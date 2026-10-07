@@ -187,12 +187,22 @@ def _body(path: str) -> str:
 
 
 def _queued(cfg, store, acct, mime, rcpts, reply_msg=None) -> None:
-    did, warn = approve.create_draft(cfg, store, acct, mime, rcpts, reply_msg)
-    d = store.draft(did)
-    out(f"{draft_ref(did)} queued, waiting for human approval (expires {ts(d['expires'])})")
+    q = approve.create_draft(cfg, store, acct, mime, rcpts, reply_msg)
+    d = store.draft(q.did)
+    ref = draft_ref(q.did)
+    if q.state == "sent":
+        out(f"{ref} sent automatically (approval mode {cfg.mode_for(acct)}): {q.note}")
+    elif q.state == "failed":
+        out(f"{ref} automatic send failed: {q.note}")
+    elif q.state == "scheduled":
+        out(f"{ref} queued, {q.note} by mg daemon (stop it with: mg cancel {ref})")
+    else:
+        out(f"{ref} queued, waiting for human approval (expires {ts(d['expires'])})")
+        if q.note:
+            out(f"not sent automatically: {q.note}")
     out(compose.preview(mime, 300))
-    if warn:
-        print("warning: " + warn, file=sys.stderr)
+    if q.warn:
+        print("warning: " + q.warn, file=sys.stderr)
 
 
 def cmd_draft(a) -> None:
@@ -217,8 +227,9 @@ def cmd_reply(a) -> None:
 def cmd_queue(a) -> None:
     rows = _store().pending()
     for d in rows:
+        when = f"auto-send {ts(d['send_at'])}" if d["status"] == "scheduled" else f"expires {ts(d['expires'])}"
         out(f"{draft_ref(d['id'])} {ts(d['created'])} {d['acct']} -> {short(d['to_addr'], 40)} | "
-            f"{short(d['subject'], 60)} (expires {ts(d['expires'])})")
+            f"{short(d['subject'], 60)} ({when})")
         if a.full:
             out(compose.preview(bytes(d["mime"])))
             out()
@@ -294,6 +305,19 @@ def cmd_doctor(a) -> None:
     if not cfg:
         raise SystemExit(1)
     for acct in cfg.accounts.values():
+        mode = cfg.mode_for(acct)
+        if mode == "auto":
+            out(f"WARN {acct.name}: approval mode auto, drafts are SENT WITHOUT human approval "
+                f"(undo {cfg.undo_seconds}s, max {cfg.max_per_hour}/h)")
+        elif mode == "rules":
+            r = cfg.rules
+            out(f"warn {acct.name}: approval mode rules, matching drafts are sent without approval "
+                f"(allow_to {r.allow_to or 'none'}, reply_only {r.reply_only}, undo {cfg.undo_seconds}s)")
+        else:
+            out(f"ok   {acct.name}: approval mode manual")
+    if cfg.undo_seconds and any(cfg.mode_for(a) != "manual" for a in cfg.accounts.values()):
+        out("info undo window needs `mg daemon` running, otherwise scheduled drafts are never sent")
+    for acct in cfg.accounts.values():
         def imap_check(acct=acct):
             conn = imapsync.connect(acct)
             try:
@@ -330,8 +354,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"mailgate {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
-    def cmd(name: str, fn, help: str) -> argparse.ArgumentParser:
-        sp = sub.add_parser(name, help=help, description=help)
+    def cmd(name: str, fn, help: str, aliases: tuple = ()) -> argparse.ArgumentParser:
+        sp = sub.add_parser(name, help=help, description=help, aliases=list(aliases))
         sp.set_defaults(fn=fn)
         return sp
 
@@ -398,7 +422,8 @@ def parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-ntfy", action="store_true")
     sp = cmd("init", cmd_init, "write an example config")
     sp.add_argument("--force", action="store_true")
-    cmd("doctor", cmd_doctor, "check config and connectivity (never prints secrets)")
+    cmd("doctor", cmd_doctor, "check config, approval mode and connectivity (never prints secrets)",
+        aliases=("config-check",))
     return p
 
 

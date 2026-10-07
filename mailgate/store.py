@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS seen(watcher TEXT, msg INTEGER, PRIMARY KEY(watcher, 
 CREATE TABLE IF NOT EXISTS watchers(name TEXT PRIMARY KEY, created INTEGER);
 CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, acct TEXT, created INTEGER, expires INTEGER,
   status TEXT, mime BLOB, sha256 TEXT, token_hash TEXT, sender TEXT, rcpts TEXT, to_addr TEXT,
-  subject TEXT, reply_msg INTEGER, error TEXT);
+  subject TEXT, reply_msg INTEGER, error TEXT, send_at INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, ts INTEGER, draft INTEGER, action TEXT,
   via TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
@@ -87,6 +87,8 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        if "send_at" not in {r[1] for r in self.q("PRAGMA table_info(drafts)")}:  # 0.1.0 databases
+            self.db.execute("ALTER TABLE drafts ADD COLUMN send_at INTEGER")
         try:
             self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(fr, subject, body)")
             self.fts = True
@@ -228,8 +230,20 @@ class Store:
         return self.one("SELECT * FROM drafts WHERE id=?", (rowid,))
 
     def pending(self) -> list[sqlite3.Row]:
+        """Drafts waiting for approval ('pending') or for their undo window ('scheduled')."""
         self.expire()
-        return self.q("SELECT * FROM drafts WHERE status='pending' ORDER BY id")
+        return self.q("SELECT * FROM drafts WHERE status IN ('pending','scheduled') ORDER BY id")
+
+    def due(self) -> list[sqlite3.Row]:
+        """Scheduled drafts whose undo window is over."""
+        return self.q("SELECT * FROM drafts WHERE status='scheduled' AND send_at<=? ORDER BY id", (int(time.time()),))
+
+    def unattended_count(self, acct: str, since: int) -> int:
+        """Unattended sends (and scheduled ones) for an account since a time, for the rate limit."""
+        return self.one("SELECT (SELECT COUNT(*) FROM audit a JOIN drafts d ON d.id=a.draft WHERE d.acct=? "
+                        "AND a.action='sent' AND a.via LIKE 'auto%' AND a.ts>=?) + "
+                        "(SELECT COUNT(*) FROM drafts WHERE acct=? AND status='scheduled')",
+                        (acct, since, acct))[0]
 
     def claim(self, rowid: int, frm: str, to: str) -> bool:
         """Atomically move a draft from one status to another."""

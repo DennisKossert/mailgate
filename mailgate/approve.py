@@ -1,6 +1,7 @@
 """Draft queue, approval tokens, ntfy notifications and the send step."""
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -8,6 +9,7 @@ import re
 import secrets
 import time
 import urllib.request
+from dataclasses import dataclass
 from email.parser import BytesParser
 from email import policy
 
@@ -28,9 +30,59 @@ def sha256(data: bytes | str) -> str:
     return hashlib.sha256(data.encode() if isinstance(data, str) else data).hexdigest()
 
 
+@dataclass
+class Queued:
+    """Result of queueing a draft."""
+    did: int
+    state: str  # pending | scheduled | sent | failed
+    note: str = ""  # fallback reason or send result
+    warn: str | None = None
+
+
+def check_rules(cfg: Config, acct: Account, rcpts: list[str], mime: bytes, reply_msg: int | None) -> list[str]:
+    """Names of the [approval.rules] checks this draft fails (empty = all pass)."""
+    r, fails = cfg.rules, []
+    if r.allow_accounts is not None and acct.name not in r.allow_accounts:
+        fails.append(f"allow_accounts: {acct.name} not allowed")
+    bad = [a for a in rcpts if not any(fnmatch.fnmatchcase(a.lower(), p) for p in r.allow_to)]
+    if bad:
+        fails.append("allow_to: " + ", ".join(bad))
+    if r.reply_only and reply_msg is None:
+        fails.append("reply_only: not a reply")
+    if r.deny_attachments and any(True for _ in BytesParser(policy=policy.default).parsebytes(mime).iter_attachments()):
+        fails.append("deny_attachments: has attachments")
+    return fails
+
+
+def decide(cfg: Config, store: Store, acct: Account, rcpts: list[str], mime: bytes,
+           reply_msg: int | None) -> tuple[str | None, str]:
+    """(audit 'via' for an unattended send, '') or (None, reason it needs a human)."""
+    mode = cfg.mode_for(acct)
+    if mode == "manual":
+        return None, ""
+    if mode == "rules" and (fails := check_rules(cfg, acct, rcpts, mime, reply_msg)):
+        return None, "rule failed: " + "; ".join(fails)
+    if store.unattended_count(acct.name, int(time.time()) - 3600) >= cfg.max_per_hour:
+        return None, f"rate limit reached ({cfg.max_per_hour}/h for {acct.name})"
+    return ("auto" if mode == "auto" else "auto-rules"), ""
+
+
+def _notify(cfg: Config, store: Store, did: int, mime: bytes, token: str, note: str = "",
+            stop: bool = False) -> str | None:
+    """Publish the approval (or Stop) notification if ntfy is configured; returns a warning on failure."""
+    if not cfg.ntfy:
+        return None
+    try:
+        ntfy_publish(cfg, ntfy_payload(cfg, did, mime, token, note, stop))
+    except Exception as e:  # draft stays queued; other backends still work
+        store.audit(did, "notify_failed", "ntfy", str(e)[:200])
+        return f"ntfy notification failed: {e}"
+    return None
+
+
 def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
-                 reply_msg: int | None = None, via: str = "cli") -> tuple[int, str | None]:
-    """Queue a rendered message. Returns (draft rowid, ntfy warning or None)."""
+                 reply_msg: int | None = None, via: str = "cli") -> Queued:
+    """Queue a rendered message, then apply the approval mode (manual, auto or rules)."""
     token = secrets.token_urlsafe(18)
     msg = BytesParser(policy=policy.default).parsebytes(mime)
     now = int(time.time())
@@ -39,18 +91,59 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
                           sender=acct.email, rcpts=json.dumps(rcpts), to_addr=str(msg["To"] or ""),
                           subject=str(msg["Subject"] or ""), reply_msg=reply_msg)
     store.audit(did, "queued", via, f"{len(rcpts)} rcpt, {len(mime)} bytes")
-    warn = None
-    if cfg.ntfy:
-        try:
-            ntfy_publish(cfg, ntfy_payload(cfg, did, mime, token))
-        except Exception as e:  # draft stays queued; other backends still work
-            warn = f"ntfy notification failed: {e}"
-            store.audit(did, "notify_failed", "ntfy", str(e)[:200])
-    return did, warn
+    auto, reason = decide(cfg, store, acct, rcpts, mime, reply_msg)
+    if not auto:
+        if reason:
+            store.audit(did, "manual_fallback", "system", reason)
+        return Queued(did, "pending", reason, _notify(cfg, store, did, mime, token, reason))
+    if cfg.undo_seconds:
+        store.db.execute("UPDATE drafts SET status='scheduled', send_at=? WHERE id=?", (now + cfg.undo_seconds, did))
+        store.audit(did, "scheduled", auto, f"send in {cfg.undo_seconds}s")
+        return Queued(did, "scheduled", f"auto-send in {cfg.undo_seconds}s",
+                      _notify(cfg, store, did, mime, token, stop=True))
+    return _send_unattended(cfg, store, did, auto)
 
 
-def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str) -> dict:
-    """ntfy JSON message with Send/Discard http actions posting to the reply topic."""
+def _send_unattended(cfg: Config, store: Store, did: int, via: str) -> Queued:
+    d = store.draft(did)
+    try:
+        res = send_draft(cfg, store, did, via, note=f"mode={cfg.mode_for(cfg.account(d['acct']))}")
+    except ApprovalError as e:
+        ntfy_info(cfg, f"mailgate: {draft_ref(did)} automatic send failed: {e}")
+        return Queued(did, "failed", str(e))
+    ntfy_info(cfg, f"mailgate: {draft_ref(did)} sent automatically ({via}) to {d['to_addr']} | {d['subject']}")
+    return Queued(did, "sent", res)
+
+
+def process_due(cfg: Config, store: Store) -> list[str]:
+    """Send scheduled drafts whose undo window is over (called by mg daemon)."""
+    out = []
+    for d in store.due():
+        acct = cfg.account(d["acct"])
+        reason = ""
+        if cfg.mode_for(acct) == "manual":
+            reason = "approval mode is now manual"
+        elif store.unattended_count(acct.name, int(time.time()) - 3600) - _scheduled(store, acct.name) >= cfg.max_per_hour:
+            reason = f"rate limit reached ({cfg.max_per_hour}/h for {acct.name})"
+        if reason:  # back to manual approval with a fresh token
+            token = secrets.token_urlsafe(18)
+            if store.claim(d["id"], "scheduled", "pending"):
+                store.db.execute("UPDATE drafts SET token_hash=? WHERE id=?", (sha256(token), d["id"]))
+                store.audit(d["id"], "manual_fallback", "system", reason)
+                _notify(cfg, store, d["id"], bytes(d["mime"]), token, reason)
+                out.append(f"{draft_ref(d['id'])} needs approval: {reason}")
+            continue
+        q = _send_unattended(cfg, store, d["id"], "auto" if cfg.mode_for(acct) == "auto" else "auto-rules")
+        out.append(q.note)
+    return out
+
+
+def _scheduled(store: Store, acct: str) -> int:
+    return store.one("SELECT COUNT(*) FROM drafts WHERE acct=? AND status='scheduled'", (acct,))[0]
+
+
+def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str, note: str = "", stop: bool = False) -> dict:
+    """ntfy message with http actions posting to the reply topic: Send/Discard, or only Stop."""
     n = cfg.ntfy
     assert n
     ref = draft_ref(did)
@@ -63,9 +156,14 @@ def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str) -> dict:
         if headers:
             a["headers"] = headers
         return a
-    return {"topic": n.topic, "title": f"mailgate {ref}: approve sending?",
-            "message": preview(mime, NTFY_MAX_BODY), "priority": n.priority, "tags": ["email"],
-            "actions": [action(n.approve_label, "approve"), action(n.reject_label, "reject")]}
+    if stop:
+        title, actions = f"mailgate {ref}: sending automatically in {cfg.undo_seconds}s", [action(n.stop_label, "reject")]
+    else:
+        title = f"mailgate {ref}: approve sending?"
+        actions = [action(n.approve_label, "approve"), action(n.reject_label, "reject")]
+    body = (f"Not sent automatically: {note}\n\n" if note else "") + preview(mime, NTFY_MAX_BODY)
+    return {"topic": n.topic, "title": title, "message": body, "priority": n.priority, "tags": ["email"],
+            "actions": actions}
 
 
 def ntfy_publish(cfg: Config, payload: dict) -> None:
@@ -93,11 +191,11 @@ def _get(store: Store, did: int):
     return d
 
 
-def send_draft(cfg: Config, store: Store, did: int, via: str) -> str:
+def send_draft(cfg: Config, store: Store, did: int, via: str, note: str = "") -> str:
     """Verify hash, send via SMTP, append to Sent, audit. Returns a status line."""
     store.expire()
     d = _get(store, did)
-    if not store.claim(did, "pending", "sending"):
+    if not (store.claim(did, "pending", "sending") or store.claim(did, "scheduled", "sending")):
         raise ApprovalError(f"{draft_ref(did)} is {store.draft(did)['status']}, not pending")
     mime = bytes(d["mime"])
     if not hmac.compare_digest(sha256(mime), d["sha256"]):
@@ -119,13 +217,13 @@ def send_draft(cfg: Config, store: Store, did: int, via: str) -> str:
             detail = f"appended to {acct.sent_folder}"
         except Exception as e:
             detail = f"append to {acct.sent_folder} failed: {e}"[:200]
-    store.audit(did, "sent", via, detail)
+    store.audit(did, "sent", via, "; ".join(x for x in (note, detail) if x))
     return f"{draft_ref(did)} sent to {d['to_addr']}" + (f" ({detail})" if detail else "")
 
 
 def reject_draft(store: Store, did: int, via: str, action: str = "rejected") -> str:
     _get(store, did)
-    if not store.claim(did, "pending", action):
+    if not (store.claim(did, "pending", action) or store.claim(did, "scheduled", action)):
         raise ApprovalError(f"{draft_ref(did)} is {store.draft(did)['status']}, not pending")
     store.audit(did, action, via)
     return f"{draft_ref(did)} {action}"

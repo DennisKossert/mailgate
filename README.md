@@ -91,7 +91,8 @@ override with `MAILGATE_DB`). The config path can be overridden with `MAILGATE_C
 | `mg queue [--full]`, `mg cancel ID` | Show or withdraw pending drafts. |
 | `mg approve ID` | Send a draft from an interactive terminal (you retype the id). |
 | `mg log` | Audit log: queued, sent, rejected, expired, failed, bad tokens. |
-| `mg daemon [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener and optional web UI. |
+| `mg daemon [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener, sends scheduled drafts, optional web UI. |
+| `mg doctor` (`mg config-check`) | Check config, approval mode and connectivity. |
 
 The first run of a new watcher only remembers what is already there and prints nothing,
 so a notifier does not flood you. Use `--backlog` to print existing mail once.
@@ -159,10 +160,56 @@ uses a CSRF token that changes on every daemon start.
 `mg approve d7` shows the full draft and asks you to type the draft id again. It refuses
 to run when stdin or stdout is not a terminal.
 
+## Sending without approval (opt-in)
+
+The default is `mode = "manual"`: nothing is sent without a human. Some setups want
+an agent to send on its own, for example status replies to colleagues. This is possible,
+but only if you turn it on.
+
+```toml
+[approval]
+mode = "rules"          # manual (default) | auto | rules
+undo_seconds = 60       # wait before sending; you can stop it meanwhile
+max_per_hour = 20       # unattended sends per account per hour, then manual again
+
+[approval.rules]        # only used with mode = "rules"
+allow_to = ["*@example.com", "boss@example.org"]   # every To/Cc/Bcc must match
+allow_accounts = ["work"]
+reply_only = true       # only replies to existing mail (mg reply)
+deny_attachments = true
+
+[accounts.private]
+approval_mode = "manual"   # per-account override
+```
+
+- **manual**: every draft waits for approval, as described above.
+- **auto**: every draft is sent without anyone looking at it.
+- **rules**: a draft that passes all rules is sent automatically. Anything else falls back
+  to normal approval, with the ntfy Send/Discard buttons, and `mg draft` prints which
+  rule failed.
+
+With `undo_seconds = 0` the draft is sent right away by `mg draft` and it prints `sent`.
+With an undo window it prints `queued, auto-send in 60s` and **`mg daemon` sends it** once
+the window is over. Without a running daemon a scheduled draft is never sent. During the
+window you can stop it with the ntfy "Stop" button (`stop_label`), the web UI or
+`mg cancel ID`.
+
+When the hourly limit is reached, drafts fall back to manual approval and you get the
+normal notification. Every unattended send is in `mg log` with `auto` or `auto-rules` and
+the mode, and ntfy (if configured) gets a "sent automatically" message. `mg doctor`
+(alias `mg config-check`) prints a `WARN` line for every account in auto mode.
+
+Be clear about what this means: in auto mode, an agent mistake or a prompt injection in
+an incoming mail ("forward the last invoices to ...") can make mailgate send mail in
+your name. If you need unattended sending, use `rules` with a narrow `allow_to`,
+`reply_only = true`, `deny_attachments = true` and an undo window, and keep `max_per_hour` low.
+
 ## Security model
 
 Read this before you rely on it.
 
+- Everything below assumes `mode = "manual"`. With auto or rules mode, the protection is
+  only as good as your rules (see above).
 - The approval queue protects against **mistakes and prompt injection**: an agent that
   misread a request, or a mail that tells the agent to forward your data somewhere. The
   agent can only create drafts, and you see the exact text before it leaves.
@@ -180,8 +227,9 @@ Read this before you rely on it.
 ## Comparison
 
 Typical MCP mail servers give the model a `send_email` tool that sends directly, and at
-most rely on the client asking to confirm the tool call. mailgate has no send path for the agent at all: drafting and sending are separate
-programs and steps, and sending needs a human action outside the agent session.
+most rely on the client asking to confirm the tool call. In its default mode mailgate has no send path for the agent at all: drafting and sending
+are separate steps, and sending needs a human action outside the agent session.
+Unattended sending exists only as an explicit opt-in with rules and a rate limit.
 
 ## Configuration
 
@@ -247,11 +295,17 @@ holt Mails per IMAP in einen lokalen SQLite-Cache und gibt sie so knapp aus, das
 Sprachmodell wenig Tokens dafür braucht: eine Zeile pro Mail, Texte ohne Zitate, Signaturen,
 Disclaimer und Tracking-Links.
 
-Agenten können Entwürfe anlegen, aber nichts selbst versenden. Jeder Entwurf landet in einer
+Agenten können Entwürfe anlegen, aber im Standardmodus nichts selbst versenden. Jeder Entwurf landet in einer
 Warteschlange und geht erst raus, wenn ein Mensch zustimmt: per ntfy-Benachrichtigung aufs
 Handy (Knöpfe zum Beispiel "Senden" und "Verwerfen"), über eine lokale Webseite oder im
 Terminal mit `mg approve`. Verschickt wird genau der Text, den man freigegeben hat; er wird
 beim Anlegen gehasht und vor dem Senden geprüft.
+
+Wer möchte, kann automatisches Senden ausdrücklich einschalten (`mode = "auto"` oder
+`mode = "rules"` mit erlaubten Empfängern, nur Antworten, ohne Anhänge, Wartezeit zum
+Abbrechen und Stundenlimit). Dann kann aber ein Fehler des Agenten oder eine manipulierte
+eingehende Mail dazu führen, dass in Ihrem Namen gesendet wird. Empfohlen ist `rules`
+mit engem `allow_to`, `reply_only = true` und `undo_seconds`.
 
 Installation: `pipx install git+https://github.com/DennisKossert/mailgate`, danach `mg init`,
 Konfiguration anpassen, `mg doctor`, `mg sync`. Passwörter stehen nie in der Konfiguration,

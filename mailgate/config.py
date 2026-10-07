@@ -70,6 +70,7 @@ class Account:
     sent_folder: str | None = "Sent"
     signature: str = ""
     reply_prefix: str = "Re:"
+    approval_mode: str | None = None  # per-account override of approval.mode
 
     def password(self) -> str:
         """Run password_cmd or read password_env. Never logged."""
@@ -83,6 +84,7 @@ class Ntfy:
     reply_topic: str
     approve_label: str = "Send"
     reject_label: str = "Discard"
+    stop_label: str = "Stop"
     priority: int = 4
     token_cmd: str | None = None
     token_env: str | None = None
@@ -94,6 +96,17 @@ class Ntfy:
         return {"Authorization": "Bearer " + _secret(self.token_cmd, self.token_env, "ntfy token")}
 
 
+MODES = ("manual", "auto", "rules")
+
+
+@dataclass
+class Rules:
+    allow_to: list[str] = field(default_factory=list)  # fnmatch patterns, all recipients must match
+    allow_accounts: list[str] | None = None
+    reply_only: bool = False
+    deny_attachments: bool = True
+
+
 @dataclass
 class Config:
     accounts: dict[str, Account]
@@ -102,6 +115,14 @@ class Config:
     ntfy: Ntfy | None = None
     max_raw_bytes: int = 5_000_000
     initial_days: int = 0
+    mode: str = "manual"
+    undo_seconds: int = 0
+    max_per_hour: int = 20
+    rules: Rules = field(default_factory=Rules)
+
+    def mode_for(self, acct: Account) -> str:
+        """Effective approval mode for an account."""
+        return acct.approval_mode or self.mode
 
     def account(self, name: str | None = None) -> Account:
         name = name or self.default_account
@@ -122,6 +143,12 @@ def _server(t: dict, kind: str, acct: str) -> Server:
     return Server(host, int(t.get(f"{kind}_port", DEFAULT_PORTS[(kind, sec)])), sec)
 
 
+def _mode(v: str | None, where: str) -> str | None:
+    if v is not None and v not in MODES:
+        raise ConfigError(f"{where}: approval mode must be one of {', '.join(MODES)}")
+    return v
+
+
 def parse(data: dict) -> Config:
     """Build a Config from parsed TOML."""
     accts: dict[str, Account] = {}
@@ -139,7 +166,8 @@ def parse(data: dict) -> Config:
             imap=_server(t, "imap", name), smtp=_server(t, "smtp", name),
             password_cmd=t.get("password_cmd"), password_env=t.get("password_env"),
             folders=list(t.get("folders", ["INBOX"])), sent_folder=t.get("sent_folder", "Sent") or None,
-            signature=t.get("signature", ""), reply_prefix=t.get("reply_prefix", "Re:"))
+            signature=t.get("signature", ""), reply_prefix=t.get("reply_prefix", "Re:"),
+            approval_mode=_mode(t.get("approval_mode"), f"account {name}"))
     if not accts:
         raise ConfigError("no [accounts.NAME] section in config")
     ap = data.get("approval") or {}
@@ -151,8 +179,13 @@ def parse(data: dict) -> Config:
             raise ConfigError("approval.ntfy: reply_topic must differ from topic")
         ntfy = Ntfy(server=n.get("server", "https://ntfy.sh").rstrip("/"), topic=n["topic"],
                     reply_topic=n["reply_topic"], approve_label=n.get("approve_label", "Send"),
-                    reject_label=n.get("reject_label", "Discard"), priority=int(n.get("priority", 4)),
+                    reject_label=n.get("reject_label", "Discard"), stop_label=n.get("stop_label", "Stop"),
+                    priority=int(n.get("priority", 4)),
                     token_cmd=n.get("token_cmd"), token_env=n.get("token_env"))
+    r = ap.get("rules") or {}
+    rules = Rules(allow_to=[p.lower() for p in r.get("allow_to", [])],
+                  allow_accounts=list(r["allow_accounts"]) if "allow_accounts" in r else None,
+                  reply_only=bool(r.get("reply_only", False)), deny_attachments=bool(r.get("deny_attachments", True)))
     sync = data.get("sync") or {}
     default = data.get("default_account") or next(iter(accts))
     if default not in accts:
@@ -160,7 +193,10 @@ def parse(data: dict) -> Config:
     return Config(accounts=accts, default_account=default,
                   expiry_hours=float(ap.get("expiry_hours", 48)), ntfy=ntfy,
                   max_raw_bytes=int(sync.get("max_raw_bytes", 5_000_000)),
-                  initial_days=int(sync.get("initial_days", 0)))
+                  initial_days=int(sync.get("initial_days", 0)),
+                  mode=_mode(ap.get("mode", "manual"), "approval") or "manual",
+                  undo_seconds=max(0, int(ap.get("undo_seconds", 0))),
+                  max_per_hour=max(0, int(ap.get("max_per_hour", 20))), rules=rules)
 
 
 def load(path: Path | None = None) -> Config:
@@ -198,6 +234,7 @@ sent_folder = "Sent"              # copy of sent mail is appended here ("" to di
 signature = """Jane Doe
 Example Ltd."""
 # reply_prefix = "AW:"            # used when the subject has no Re:/AW: yet
+# approval_mode = "manual"        # per-account override of approval.mode
 
 [sync]
 max_raw_bytes = 5000000           # raw messages larger than this are not cached
@@ -205,6 +242,16 @@ initial_days = 90                 # first sync only fetches the last N days (0 =
 
 [approval]
 expiry_hours = 48                 # pending drafts expire after this
+mode = "manual"                   # manual | auto | rules. auto/rules send WITHOUT a human
+                                  # looking at the mail. Read the README first.
+# undo_seconds = 60               # auto/rules: wait this long before sending (needs mg daemon)
+# max_per_hour = 20               # unattended sends per account per hour, then manual
+
+# [approval.rules]                # only used with mode = "rules"
+# allow_to = ["*@example.com"]    # every recipient (To, Cc, Bcc) must match a pattern
+# allow_accounts = ["work"]
+# reply_only = true               # only replies to existing mail (mg reply)
+# deny_attachments = true
 
 [approval.ntfy]
 # Topic names are secrets on public servers: anyone who knows them can read them.

@@ -14,7 +14,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .approve import ApprovalError, handle_command, reject_draft, send_draft
+from .approve import ApprovalError, handle_command, process_due, reject_draft, send_draft
 from .compose import preview
 from .config import LOOPBACK, Config
 from .store import Store, draft_ref, parse_id
@@ -74,14 +74,25 @@ pre{{white-space:pre-wrap;background:#f4f4f4;padding:.8rem;border-radius:6px}}
 .d{{border-bottom:1px solid #ccc;padding:1rem 0}} button{{font-size:1rem;padding:.4rem 1rem;margin-right:.5rem}}
 .msg{{background:#eef;padding:.5rem}}</style></head><body><h1>mailgate: pending drafts</h1>{msg}{items}
 </body></html>"""
-ITEM = """<div class="d"><b>{ref}</b> account {acct}, expires {exp}<pre>{text}</pre>
+ITEM = """<div class="d"><b>{ref}</b> account {acct}, {exp}<pre>{text}</pre>
 <form method="post" action="/act"><input type="hidden" name="csrf" value="{csrf}">
-<input type="hidden" name="id" value="{ref}"><button name="do" value="send">{ok}</button>
-<button name="do" value="discard">{no}</button></form></div>"""
+<input type="hidden" name="id" value="{ref}">{buttons}</form></div>"""
+BUTTON = '<button name="do" value="{v}">{label}</button>'
 
 
 def make_handler(cfg: Config, db: Path, csrf: str, allowed_hosts: set[str]):
-    labels = (cfg.ntfy.approve_label, cfg.ntfy.reject_label) if cfg.ntfy else ("Send", "Discard")
+    labels = ((cfg.ntfy.approve_label, cfg.ntfy.reject_label, cfg.ntfy.stop_label) if cfg.ntfy
+              else ("Send", "Discard", "Stop"))
+
+    def buttons(d) -> str:
+        if d["status"] == "scheduled":
+            return BUTTON.format(v="discard", label=html.escape(labels[2]))
+        return BUTTON.format(v="send", label=html.escape(labels[0])) + BUTTON.format(v="discard", label=html.escape(labels[1]))
+
+    def when(d) -> str:
+        if d["status"] == "scheduled":
+            return "sends automatically at " + time.strftime("%m-%d %H:%M:%S", time.localtime(d["send_at"]))
+        return "expires " + time.strftime("%m-%d %H:%M", time.localtime(d["expires"]))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:
@@ -109,9 +120,8 @@ def make_handler(cfg: Config, db: Path, csrf: str, allowed_hosts: set[str]):
             store = Store(db)
             items = "".join(ITEM.format(
                 ref=draft_ref(d["id"]), acct=html.escape(d["acct"]), csrf=csrf,
-                exp=time.strftime("%m-%d %H:%M", time.localtime(d["expires"])),
-                text=html.escape(preview(bytes(d["mime"]))), ok=html.escape(labels[0]),
-                no=html.escape(labels[1])) for d in store.pending()) or "<p>Nothing pending.</p>"
+                exp=when(d), text=html.escape(preview(bytes(d["mime"]))), buttons=buttons(d))
+                for d in store.pending()) or "<p>Nothing pending.</p>"
             self._reply(200, PAGE.format(msg=f'<p class="msg">{html.escape(msg)}</p>' if msg else "", items=items))
 
         def do_POST(self) -> None:
@@ -175,7 +185,9 @@ def run(cfg: Config, db: Path, web: str | None = None, use_ntfy: bool = True) ->
         while not stop.is_set():
             for i in store.expire():
                 log(f"{draft_ref(i)} expired")
-            stop.wait(60)
+            for res in process_due(cfg, store):
+                log(f"auto: {res}")
+            stop.wait(1)
     except KeyboardInterrupt:
         pass
     finally:

@@ -45,9 +45,20 @@ class Env(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.imap, self.smtp, self.ntfy = FakeIMAP(), FakeSMTP(), FakeNtfy()
+        self.write_config()
+        self.env = {"MAILGATE_CONFIG": str(self.dir / "config.toml"), "MAILGATE_DB": str(self.dir / "mail.db"),
+                    "MG_TEST_PW": "secret"}
+        self.old_env = {k: os.environ.get(k) for k in self.env}
+        os.environ.update(self.env)
+        self.cfg = load()
+        self.store = Store(self.dir / "mail.db")
+
+    def write_config(self, approval: str = "", rules: str = "", acct: str = "") -> None:
+        """(Re)write the test config; extra TOML lines go into [approval], [approval.rules], [accounts.work]."""
         ntfy = (f'[approval.ntfy]\nserver = "{self.ntfy.url}"\ntopic = "mg-test-out"\n'
                 f'reply_topic = "mg-test-reply"\napprove_label = "Senden"\nreject_label = "Verwerfen"\n'
                 if self.ntfy_enabled else "")
+        rules = f"[approval.rules]\n{rules}\n" if rules else ""
         (self.dir / "config.toml").write_text(f'''
 [accounts.work]
 email = "jane@example.com"
@@ -62,16 +73,14 @@ password_env = "MG_TEST_PW"
 folders = ["INBOX"]
 sent_folder = "Sent"
 signature = "Jane"
+{acct}
 
 [approval]
 expiry_hours = 48
-{ntfy}''')
-        self.env = {"MAILGATE_CONFIG": str(self.dir / "config.toml"), "MAILGATE_DB": str(self.dir / "mail.db"),
-                    "MG_TEST_PW": "secret"}
-        self.old_env = {k: os.environ.get(k) for k in self.env}
-        os.environ.update(self.env)
-        self.cfg = load()
-        self.store = Store(self.dir / "mail.db")
+{approval}
+{rules}{ntfy}''')
+        if "MAILGATE_CONFIG" in os.environ and hasattr(self, "cfg"):
+            self.cfg = load()
 
     def tearDown(self) -> None:
         for k, v in self.old_env.items():
