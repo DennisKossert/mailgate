@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mailgate"
+dynamic = ["version"]
+description = "Token-efficient mail CLI for AI agents, with human approval before anything is sent"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Dennis Kossert" }]
+keywords = ["email", "imap", "smtp", "cli", "llm", "agents", "human-in-the-loop", "ntfy"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Email",
+]
+
+[project.urls]
+Homepage = "https://github.com/DennisKossert/mailgate"
+Issues = "https://github.com/DennisKossert/mailgate/issues"
+
+[project.scripts]
+mg = "mailgate.cli:main"
+
+[tool.setuptools]
+packages = ["mailgate"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mailgate.__version__" }
