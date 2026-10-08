@@ -24,6 +24,10 @@ Protected against:
   Attachment names are reduced to safe characters and never leave the target folder; nothing
   is executed. Unsubscribing contacts only https URLs, and only after a human click.
   Mail data never goes into a command line.
+- **Terminal escape injection.** Subjects, names and bodies are stripped of escape sequences,
+  control characters and bidi overrides before any `mg` command or `mg tui` prints them.
+- **Macros and plugins in `mg tui`.** Sending from the TUI needs the draft id typed at the
+  keyboard; macro replay, `on_start`, plugin commands and key mappings run from them are refused.
 - **Other local users.** Config, cache, passphrase hash, plugin pins and exports are created
   with mode 600, folders with 700; `mg doctor`, `mg ui` and `mg daemon` warn when they are not.
 - **The local network.** The web UI listens on 127.0.0.1/::1 only. The only LAN listener is

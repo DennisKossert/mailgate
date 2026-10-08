@@ -148,6 +148,14 @@ def setup(mg) -> None:
     def view_unsub_rule(keys, choice):
         return "; ".join(f"{k}: {unsubscribe(k)}, {add_rule(k, choice or 'trash')}" for k in keys)
 
+    @mg.tui_command("unsub", "unsubscribe from the sender of the message (asks first)")
+    def tui_unsub(tui, args, msgs):
+        out = []
+        for sender in dict.fromkeys(m.from_addr for m in msgs):
+            if tui.confirm(f"Unsubscribe from {sender}?"):  # only a human at the keyboard can say yes
+                out.append(f"{sender}: {unsubscribe(sender)}")
+        return "; ".join(out) or "nothing done"
+
     def cli_args(p):
         p.add_argument("action", choices=("list", "run"))
         p.add_argument("senders", nargs="*", help="sender addresses (run)")

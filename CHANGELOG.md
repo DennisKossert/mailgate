@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (2026-10-08)
+
+- `mg tui`: terminal mail client (stdlib curses, imported only for `mg tui`). Modal and vim-like:
+  counts, `gg`/`G`, `/` full-text search, `:` command line with completion, `|` pipelines (moves
+  run last), marks, visual selection for bulk actions, macros (`q`/`@`), folder list, threaded
+  view, layouts split / vsplit / full, `$EDITOR` compose with "send now" only after typing the
+  draft id. Config in `tui.toml`: keymaps, colours, layout, `index_format`, sorting, `on_start`,
+  `html_viewer` (argv, 0600 temp file), `opener`. See TUI.md.
+- Plugin API: `tui_command`, `tui_keymap`, `tui_statusline`; followup adds `:remind`/`:snooze`
+  and a status segment, unsubscribe adds `:unsub` (asks first).
+- Security: terminal escape sequences, control characters and bidi overrides from mail are
+  removed before printing, in `mg tui` and in every `mg` command.
+- `mg ui`: the "Transfer to another device" button needs `[ui] allow_pairing = true` (default
+  off); `mg export --pair` is unchanged.
+- `approve.notify_pending()` and `create_draft(notify=False)` for drafts that may be sent at once.
+
 ## 0.4.0 (2026-10-08)
 
 Small core, plugins for the rest, and a security pass.

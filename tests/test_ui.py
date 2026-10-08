@@ -313,6 +313,10 @@ class PluginUiTest(UiTest):
         self.assertEqual(self.js("GET", "/api/plugin/nope/view/x")[0], 404)
         _, _, doc = self.req("GET", "/api/msg/2/html")
         self.assertIn('href="https://example.com/x" title="https://example.com/x"', doc.decode())
+        self.assertFalse(self.js("GET", "/api/state")[1]["pairing"])
+        st, d = self.js("POST", "/api/pair", {})  # off unless [ui] allow_pairing = true
+        self.assertEqual(st, 403)
+        self.assertIn("allow_pairing", d["error"])
 
     # parent tests already ran with the default plugin set
     test_login_required = test_csrf_host_origin_and_expiry = test_list_msg_html_att = None

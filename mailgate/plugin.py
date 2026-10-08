@@ -207,6 +207,23 @@ class PluginAPI:
             raise PluginError(f"{self.name}: view {view_id!r} must be registered first")
         return deco
 
+    def tui_command(self, name: str, help: str = ""):
+        """Decorator: `:name args` in `mg tui`; fn(tui, args: str, msgs: list[Msg]) -> str | None.
+        tui offers status(), current(), selection(), run(cmdline) and confirm(question)."""
+        def deco(fn):
+            self._reg.tui_commands[name] = (self, fn, help)
+            return fn
+        return deco
+
+    def tui_keymap(self, mode: str, key: str, command: str) -> None:
+        """Bind a key in `mg tui` (mode: normal, reader, visual, folders) to a command line."""
+        self._reg.tui_keys.append((mode, key, command))
+
+    def tui_statusline(self, fn):
+        """Decorator: fn(tui) -> str, a segment on the right side of the `mg tui` status line."""
+        self._reg.tui_status.append((self, fn))
+        return fn
+
     # ---- data -------------------------------------------------------------------------------
     def _store(self):
         from .store import Store
@@ -343,6 +360,9 @@ class Registry:
         self.commands: dict[str, Command] = {}
         self.ui_actions: list[UIAction] = []
         self.ui_views: list[UIView] = []
+        self.tui_commands: dict[str, tuple] = {}  # name -> (api, fn, help)
+        self.tui_keys: list[tuple[str, str, str]] = []  # (mode, key, command line)
+        self.tui_status: list[tuple] = []  # (api, fn)
 
     def call(self, api: PluginAPI, fn: Callable, *args, default=None, phase: str = ""):
         """Run plugin code with the send guard set; errors are logged, never raised into the core."""

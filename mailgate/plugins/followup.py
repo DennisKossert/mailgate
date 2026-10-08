@@ -137,6 +137,28 @@ def setup(mg) -> None:
     def view_cancel(keys, choice):
         return ", ".join(set_status(k, "cancelled") for k in keys)
 
+    @mg.tui_command("remind", "remind [3d|1w|DATE] [!]: follow up later (! = only if nobody replied)")
+    def tui_remind(tui, args, msgs):
+        words = args.split()
+        when = next((w for w in words if w != "!"), mg.settings.get("default", "3d"))
+        noreply = "!" in words or when.endswith("!")
+        due = parse_when(when.rstrip("!"))
+        for m in msgs:
+            add(m, due, "remind", noreply)
+        return f"{len(msgs)} reminder(s) for {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))}"
+
+    @mg.tui_command("snooze", "snooze [tomorrow|2d|DATE]: hide from the inbox until then")
+    def tui_snooze(tui, args, msgs):
+        due = parse_when(args.strip() or "tomorrow")
+        for m in msgs:
+            add(m, due, "snooze")
+        return f"{len(msgs)} snoozed until {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))}"
+
+    @mg.tui_statusline
+    def tui_due(tui):
+        n = badge()
+        return f"{n} follow-up{'s' if n != 1 else ''} due" if n else ""
+
     def remind_args(p):
         p.add_argument("id", nargs="?")
         p.add_argument("--in", dest="when", help="5d, 12h, 2w, tomorrow or YYYY-MM-DD [HH:MM]")

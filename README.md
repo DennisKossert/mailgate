@@ -6,7 +6,8 @@ nothing is sent until a human approves it, on the phone through
 [ntfy](https://ntfy.sh), in a local web page, or in a terminal.
 
 For the human there is also an optional local web mail client, `mg ui`
-(see [Web UI](#web-ui-optional-for-humans)). Everything beyond the core comes as
+(see [Web UI](#web-ui-optional-for-humans)), and a vim-like terminal client, `mg tui`
+(see [TUI.md](TUI.md)). Everything beyond the core comes as
 [plugins](PLUGINS.md): phishing hints, link cleaning, unsubscribe, follow-ups and your own.
 
 Python 3.11+, standard library only, MIT license.
@@ -110,6 +111,7 @@ password_cmd = "powershell -NoProfile -Command \"(Get-StoredCredential -Target m
 | `mg daemon [--sync] [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener, sends scheduled drafts, optional web UI. `--sync` adds headless background sync, IMAP IDLE, sorting rules and plugin tasks. |
 | `mg doctor` (`mg config-check`) | Check config, approval mode and connectivity. |
 | `mg ui [--host 127.0.0.1] [--port 8766] [--open]` | Local web mail client for humans, see below. |
+| `mg tui` | Terminal mail client for humans: modal, vim-like, configurable (`tui.toml`). See [TUI.md](TUI.md). |
 | `mg mark ID... --read/--unread/--flag/--unflag` | Change flags **on the server**. |
 | `mg move ID... --to FOLDER / --archive / --trash` | Move mail **on the server**. Trash is a folder; nothing is deleted for good. |
 | `mg rules test [-n 50]`, `mg rules apply [-n N]` | Sorting rules: dry run over the last N mails, or apply them. |
@@ -339,6 +341,20 @@ read lets later rules add a move. Core actions: `move:<folder>`, `archive`, `tra
 - Agents must not use `mg ui`, its HTTP endpoints, `mg mark`, `mg move` or `mg rules apply`
   unless you ask them to. `AGENTS.md` tells them so.
 
+## Terminal UI (optional, for humans)
+
+![mg tui: folder list, message list and reader with phishing warnings](docs/tui.png)
+
+`mg tui` is a modal, vim-like terminal client: `j`/`k`, `gg`/`G`, counts, `/` full-text
+search, `:` commands with completion that chain with `|` (`:move Archiv | mark read`), marks,
+visual selection for bulk actions, macros (`qa` … `q`, `@a`) and folder, list and reader panes
+in three layouts. Keys, colours, layout, the list format (like mutt's index_format), sorting
+and start commands live in `~/.config/mailgate/tui.toml`; plugins can add commands, keys and
+status line segments. Writing uses your `$EDITOR`; sending from the TUI needs you to type the
+draft id, exactly like `mg approve`, and macros or plugins can never do it. Mail text is
+stripped of terminal escape sequences. Standard library curses only, loaded only for `mg tui`.
+Everything else: [TUI.md](TUI.md).
+
 ## Plugins and integrations
 
 The core stays small. Phishing hints (`auth`), link cleaning (`linkclean`) and duplicate
@@ -368,7 +384,8 @@ exported either. Imported passwords go into the system keyring (`secret-tool` on
 Secrets need the optional `cryptography` package; without it, `--with-secrets` refuses
 instead of writing passwords in plain text.
 
-Over the local network: `mg export --pair` (or "Transfer to another device" in `mg ui`) shows
+Over the local network: `mg export --pair` (or "Transfer to another device" in `mg ui`, only
+with `[ui] allow_pairing = true`) shows
 a QR code and a command like `mg import 7KQ4-29XF-M3PA@192.168.1.20:8767` for the other
 device. The bundle is encrypted with the one-time code, which never crosses the network.
 It works once, for 10 minutes, and locks after five wrong codes.
@@ -393,6 +410,8 @@ how to report problems.
 - The cache contains your mail in plain form. It is protected by file permissions only.
   Use disk encryption.
 - `mg doctor` and the logs never print passwords or tokens.
+- Text from mail never reaches your terminal raw: every `mg` command and `mg tui` remove
+  escape sequences, control characters and bidi overrides first.
 - `mg ui` adds a second way to send: as a human, without the queue. It is protected by its
   passphrase against agents using HTTP, not against malicious local processes (see
   [Web UI security](#web-ui-security)).
@@ -510,6 +529,16 @@ festgelegt wird (gespeichert nur als scrypt-Hash); ohne Passphrase ist sie nur l
 Das schützt davor, dass ein Agent über HTTP sendet, aber nicht vor einem bösartigen
 Programm, das unter dem eigenen Benutzer läuft. Tastenkürzel: `j`/`k`, `r`, `a`, `f`,
 `c`, `/`, `e`, `#`, `u`, `?` für die Liste.
+
+Seit 0.5 gibt es `mg tui`, ein Mailprogramm fürs Terminal im Stil von vim: Tasten wie `j`/`k`,
+`gg`/`G`, Zähler, Suche mit `/`, Befehle mit `:` (mit Vervollständigung und Verkettung per `|`,
+z. B. `:move Archiv | mark read`), Marken, Auswahl mehrerer Mails, Makros und mehrere
+Fensteraufteilungen. Tasten, Farben, Aufteilung und Listenformat stehen in
+`~/.config/mailgate/tui.toml`; Plugins können eigene Befehle, Tasten und Statuszeilen-Teile
+ergänzen. Geschrieben wird im eigenen Editor. Senden geht nur, wenn man die Entwurfsnummer
+selbst eintippt, wie bei `mg approve`; Makros und Plugins können das nie. Steuerzeichen und
+Escape-Sequenzen aus Mails werden vor der Ausgabe entfernt, in `mg tui` und in allen
+`mg`-Befehlen. Details in TUI.md.
 
 Seit 0.4 bleibt der Kern klein, alles Weitere sind Plugins (`mg plugins list`). Mitgeliefert
 und standardmäßig an: `auth` (Prüfsiegel aus SPF/DKIM/DMARC, Warnung bei Absendernamen, die

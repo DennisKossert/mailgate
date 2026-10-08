@@ -79,6 +79,9 @@ Registration (decorators on the `mg` object passed to `setup`):
 | `@mg.ui_action("id", label, choices=, when=, confirm=, icon=)` | button on an open message | `fn(msg, choice) -> str` |
 | `@mg.ui_view("id", label, badge=, icon=)` | sidebar view | `fn(query) -> {"items": [{"key","title","sub","meta","msg"}], "multi": bool, "empty": label}` |
 | `@mg.view_action("view_id", "id", label, choices=, confirm=)` | button in a view, works on the selected keys | `fn(keys, choice) -> str` |
+| `@mg.tui_command("name", "help")` | `:name args` in `mg tui` | `fn(tui, args, msgs) -> str`; `tui.status/current/selection/run/confirm` |
+| `mg.tui_keymap(mode, key, command)` | default key binding in `mg tui` (tui.toml wins) | plain call |
+| `@mg.tui_statusline` | segment on the right of the `mg tui` status line | `fn(tui) -> str` |
 
 Labels are a string or `{"en": ..., "de": ...}`. UI extensions are data (JSON) rendered by
 the core page; plugins cannot inject scripts or markup into the page or the mail frame.

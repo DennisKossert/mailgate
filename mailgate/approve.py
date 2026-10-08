@@ -82,7 +82,8 @@ def _notify(cfg: Config, store: Store, did: int, mime: bytes, token: str, note: 
 
 
 def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
-                 reply_msg: int | None = None, via: str = "cli", manual: bool = False) -> Queued:
+                 reply_msg: int | None = None, via: str = "cli", manual: bool = False,
+                 notify: bool = True) -> Queued:
     """Queue a rendered message, then apply the approval mode (manual, auto or rules).
     manual=True always waits for a human (used for unsubscribe mails)."""
     token = secrets.token_urlsafe(18)
@@ -98,13 +99,23 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
     if not auto:
         if reason:
             store.audit(did, "manual_fallback", "system", reason)
-        return Queued(did, "pending", reason, _notify(cfg, store, did, mime, token, reason))
+        return Queued(did, "pending", reason, _notify(cfg, store, did, mime, token, reason) if notify else None)
     if cfg.undo_seconds:
         store.db.execute("UPDATE drafts SET status='scheduled', send_at=? WHERE id=?", (now + cfg.undo_seconds, did))
         store.audit(did, "scheduled", auto, f"send in {cfg.undo_seconds}s")
         return Queued(did, "scheduled", f"auto-send in {cfg.undo_seconds}s",
                       _notify(cfg, store, did, mime, token, stop=True))
     return _send_unattended(cfg, store, did, auto)
+
+
+def notify_pending(cfg: Config, store: Store, did: int) -> str | None:
+    """(Re)send the ntfy approval request for a pending draft with a fresh token."""
+    d = _get(store, did)
+    if d["status"] != "pending":
+        raise ApprovalError(f"{draft_ref(did)} is {d['status']}, not pending")
+    token = secrets.token_urlsafe(18)
+    store.db.execute("UPDATE drafts SET token_hash=? WHERE id=?", (sha256(token), did))
+    return _notify(cfg, store, did, bytes(d["mime"]), token)
 
 
 def send_now(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],

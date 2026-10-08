@@ -149,6 +149,7 @@ class UI:
     idle: bool = True
     lang: str = "auto"  # auto | de | en
     mark_read: bool = True  # mark a message read when it is opened
+    allow_pairing: bool = False  # "Transfer to another device" button (opens a LAN listener)
 
 
 @dataclass
@@ -288,7 +289,8 @@ def _ui(t: dict) -> UI:
     if lang not in ("auto", "de", "en"):
         raise ConfigError("ui.lang must be auto, de or en")
     return UI(port=int(t.get("port", 8766)), sync_minutes=max(0.25, float(t.get("sync_minutes", 2))),
-              idle=bool(t.get("idle", True)), lang=lang, mark_read=bool(t.get("mark_read", True)))
+              idle=bool(t.get("idle", True)), lang=lang, mark_read=bool(t.get("mark_read", True)),
+              allow_pairing=bool(t.get("allow_pairing", False)))
 
 
 def insecure_paths() -> list[str]:
@@ -393,6 +395,7 @@ reject_label = "Discard"          # e.g. "Verwerfen"
 # sync_minutes = 2                # background sync while mg ui runs (plus IMAP IDLE on INBOX)
 # lang = "auto"                   # auto (browser language) | de | en
 # mark_read = true                # mark mail read when opened
+# allow_pairing = false           # true: "Transfer to another device" button (LAN listener, 10 min)
 
 # Plugins: mg plugins list. Bundled: auth, linkclean, dedupe (on by default),
 # unsubscribe, attachments, followup (opt-in). Single-file plugins go into plugins/ next to this file.

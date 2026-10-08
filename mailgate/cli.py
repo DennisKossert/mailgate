@@ -16,13 +16,15 @@ from pathlib import Path
 
 from . import __version__, approve, compose, imapsync, smtpsend
 from .config import ConfigError, config_path, db_path, example, load
+from .clean import term_safe
 from .store import Store, b36, draft_ref, parse_id
 
 USAGE_NOTE = "Agents can only create drafts. A human approves every send (ntfy, web UI or `mg approve`)."
 
 
 def out(s: str = "") -> None:
-    sys.stdout.write(s + "\n")
+    """Print to the terminal. Mail text can contain escape sequences, so everything goes through term_safe."""
+    sys.stdout.write(term_safe(s) + "\n")
 
 
 def short(s: str | None, n: int) -> str:
@@ -331,6 +333,11 @@ def cmd_rules(a) -> None:
     for ln in lines:
         out(ln)
     out(f"applied to {len(lines)} mails")
+
+
+def cmd_tui(a) -> None:
+    from . import tui
+    tui.run(load(), db_path())
 
 
 def cmd_ui(a) -> None:
@@ -655,6 +662,7 @@ def parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-ntfy", action="store_true")
     sp.add_argument("--sync", action="store_true",
                     help="also sync in the background (IDLE + [sync] minutes), apply [[rules]], send reminders")
+    cmd("tui", cmd_tui, "terminal mail client for humans (vim-like keys, ~/.config/mailgate/tui.toml)")
     sp = cmd("ui", cmd_ui, "local web mail client for humans (sends without approval, passphrase protected)")
     sp.add_argument("--host", default="127.0.0.1", help="loopback address (default 127.0.0.1)")
     sp.add_argument("--port", type=int, help="default 8766 or [ui] port")

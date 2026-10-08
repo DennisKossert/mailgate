@@ -357,7 +357,7 @@ def state(app: App, sess: dict | None) -> dict:
             "default": app.cfg.default_account, "drafts": len(store.pending()) if (sess or app.readonly) else 0,
             "last_sync": app.last_sync, "error": app.last_error,
             "plugins": plugin_ui(app) if (sess or app.readonly) else {"views": [], "actions": []},
-            "pairing": migrate_available()}
+            "pairing": app.cfg.ui.allow_pairing and migrate_available()}
 
 
 def migrate_available() -> bool:
@@ -555,6 +555,8 @@ def plugin_view_action(app: App, name: str, vid: str, aid: str, body: dict) -> d
 def start_pairing(app: App) -> dict:
     """'Transfer to another device': LAN pairing with secrets, started by a logged-in human."""
     from . import migrate
+    if not app.cfg.ui.allow_pairing:
+        raise PermissionError("pairing from the web UI is off; set [ui] allow_pairing = true or use mg export --pair")
     if app.pairing and app.pairing.state == "waiting":
         p = app.pairing
     else:
@@ -736,6 +738,8 @@ def make_handler(app: App, hosts: set[str]):
                 if m := re.fullmatch(r"/api/drafts/(d[0-9a-z]+)", path):
                     return self._json(draft_action(app, m.group(1), body.get("do", "")))
                 return self._err(404, "not found")
+            except PermissionError as e:
+                return self._err(403, str(e))
             except (ValueError, LookupError, approve.ApprovalError) as e:
                 return self._err(400, str(e))
             except Exception as e:

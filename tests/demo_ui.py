@@ -94,6 +94,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8766)
     ap.add_argument("--auto-login", action="store_true")
+    ap.add_argument("--tui", action="store_true", help="run mg tui instead of the web UI")
     a = ap.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="mg-demo-"))
     imap, smtp = FakeIMAP(), FakeSMTP()
@@ -127,6 +128,10 @@ enabled = ["auth", "linkclean", "dedupe", "unsubscribe", "followup"]
                                 "Hi Max,\n\nthe north window is 100 cm wide, the drawing is updated.\n\nJane",
                                 in_reply_to="<g3@example.org>")
     approve.create_draft(cfg, store, cfg.account(), mime, rcpts, via="agent")
+    if a.tui:
+        from mailgate import tui
+        tui.run(load(), tmp / "mail.db")
+        return
     webui.set_passphrase("demo-passphrase", webui.pass_path())
     srv, app = webui.server(cfg, tmp / "mail.db", "127.0.0.1", a.port)
     if a.auto_login:

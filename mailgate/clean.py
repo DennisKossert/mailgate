@@ -14,6 +14,18 @@ PARA_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul", "ol", "bloc
 LINE_TAGS = {"div", "tr", "section", "article", "header", "footer", "center", "dd", "dt"}
 
 
+_ESC_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[PX^_][^\x1b]*(?:\x1b\\)?|.?)")
+_CTRL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def term_safe(s: str | None, oneline: bool = False) -> str:
+    """Remove terminal escape sequences, control characters and bidi overrides from mail text,
+    so a subject or body can never move the cursor, retitle the window or fake other output."""
+    s = _ESC_SEQ.sub("", s or "").replace("\r\n", "\n").replace("\r", "\n")
+    s = _CTRL.sub("", s)
+    return " ".join(s.split()) if oneline else s
+
+
 def short_url(url: str) -> str:
     """Keep short clean URLs, reduce long or tracking ones to their domain."""
     if len(url) <= 50 and "?" not in url and "%" not in url:
