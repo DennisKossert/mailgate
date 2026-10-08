@@ -155,8 +155,11 @@ class Store:
         return self.one("SELECT * FROM msgs WHERE id=?", (rowid,))
 
     @staticmethod
-    def _filters(acct=None, folder=None, sender=None, since=None, unread=False) -> tuple[str, list]:
+    def _filters(acct=None, folder=None, sender=None, since=None, unread=False,
+                 before: tuple[int, int] | None = None) -> tuple[str, list]:
         w, a = [], []
+        if before:  # keyset pagination: rows older than (date, id)
+            w.append("(m.date<? OR (m.date=? AND m.id<?))"); a += [before[0], before[0], before[1]]
         if acct:
             w.append("m.acct=?"); a.append(acct)
         if folder:
@@ -169,23 +172,24 @@ class Store:
             w.append("m.unread=1")
         return " AND ".join(w) or "1", a
 
-    def list(self, limit: int = 20, **f) -> list[sqlite3.Row]:
+    def list(self, limit: int = 20, extra: str = "", **f) -> list[sqlite3.Row]:
         w, a = self._filters(**f)
-        return self.q(f"SELECT {LIST_COLS} FROM msgs m WHERE {w} ORDER BY m.date DESC, m.id DESC LIMIT ?", a + [limit])
+        return self.q(f"SELECT {LIST_COLS}{extra} FROM msgs m WHERE {w} ORDER BY m.date DESC, m.id DESC LIMIT ?",
+                      a + [limit])
 
-    def search(self, query: str, limit: int = 20, **f) -> list[sqlite3.Row]:
+    def search(self, query: str, limit: int = 20, extra: str = "", **f) -> list[sqlite3.Row]:
         w, a = self._filters(**f)
-        cols = ", ".join("m." + c.strip() for c in LIST_COLS.split(","))
+        cols = ", ".join("m." + c.strip() for c in LIST_COLS.split(",")) + extra
         if self.fts:
             terms = " ".join('"' + t.replace('"', '""') + '"' for t in query.split())
             return self.q(f"SELECT {cols} FROM fts JOIN msgs m ON m.id=fts.rowid WHERE fts MATCH ? AND {w} "
-                          "ORDER BY m.date DESC LIMIT ?", [terms] + a + [limit])
+                          "ORDER BY m.date DESC, m.id DESC LIMIT ?", [terms] + a + [limit])
         tw, ta = [], []
         for t in query.split():
             tw.append("(m.from_name LIKE ? OR m.from_addr LIKE ? OR m.subject LIKE ? OR m.body LIKE ?)")
             ta += [f"%{t}%"] * 4
         return self.q(f"SELECT {cols} FROM msgs m WHERE {' AND '.join(tw) or '1'} AND {w} "
-                      "ORDER BY m.date DESC LIMIT ?", ta + a + [limit])
+                      "ORDER BY m.date DESC, m.id DESC LIMIT ?", ta + a + [limit])
 
     def thread(self, rowid: int) -> list[sqlite3.Row]:
         """All cached messages of the conversation, oldest first, deduplicated by Message-ID."""

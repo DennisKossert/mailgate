@@ -25,7 +25,8 @@ def addr_list(values: list[str] | None) -> list[str]:
 
 def build(acct: Account, to: list[str], subject: str, body: str, cc: list[str] | None = None,
           bcc: list[str] | None = None, in_reply_to: str = "", references: str = "",
-          attach: list[str] | None = None) -> tuple[bytes, list[str]]:
+          attach: list[str] | None = None, attach_data: list[tuple[str, bytes]] | None = None,
+          signature: bool = True) -> tuple[bytes, list[str]]:
     """Render the final MIME bytes (CRLF) and the envelope recipients."""
     if not to:
         raise ValueError("no recipient")
@@ -41,14 +42,14 @@ def build(acct: Account, to: list[str], subject: str, body: str, cc: list[str] |
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = (references + " " + in_reply_to).strip()
     text = body.rstrip() + "\n"
-    if acct.signature:
+    if acct.signature and signature:
         text += "\n-- \n" + acct.signature.rstrip() + "\n"
     msg.set_content(text, cte="quoted-printable")
-    for f in attach or []:
-        p = Path(f)
-        ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    files = [(Path(f).name, Path(f).read_bytes()) for f in attach or []] + list(attach_data or [])
+    for name, data in files:
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         maint, sub = ctype.split("/", 1)
-        msg.add_attachment(p.read_bytes(), maintype=maint, subtype=sub, filename=p.name)
+        msg.add_attachment(data, maintype=maint, subtype=sub, filename=name)
     raw = msg.as_bytes(policy=policy.SMTP)
     if not raw.endswith(b"\r\n"):
         raw += b"\r\n"
@@ -61,6 +62,8 @@ def reply_fields(acct: Account, orig: Row, reply_all: bool = False) -> dict:
     name = orig["from_name"] if orig["from_name"] != orig["from_addr"] else ""
     target = orig["reply_to"] or formataddr((name, orig["from_addr"]))
     to = addr_list([target])
+    if orig["from_addr"].lower() == acct.email.lower() and addr_list([orig["to_addr"] or ""]):
+        to = addr_list([orig["to_addr"]])  # replying to my own sent mail: write to its recipients
     cc: list[str] = []
     if reply_all:
         me = acct.email.lower()

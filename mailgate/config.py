@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import subprocess
 import tomllib
@@ -71,6 +72,8 @@ class Account:
     signature: str = ""
     reply_prefix: str = "Re:"
     approval_mode: str | None = None  # per-account override of approval.mode
+    archive_folder: str | None = None  # None: \Archive special-use folder, else "Archive"
+    trash_folder: str | None = None  # None: \Trash special-use folder, else "Trash"
 
     def password(self) -> str:
         """Run password_cmd or read password_env. Never logged."""
@@ -107,6 +110,30 @@ class Rules:
     deny_attachments: bool = True
 
 
+RULE_MATCH = ("from", "to", "subject", "list_id")
+
+
+@dataclass
+class SortRule:
+    """[[rules]] entry: all given regexes must match (case-insensitive), then the actions run."""
+    name: str
+    match: dict[str, re.Pattern]  # from/to/subject/list_id -> regex
+    headers: dict[str, re.Pattern]  # header name -> regex
+    actions: list[str]  # move:<folder> | mark_read | flag
+    account: str | None = None
+    folder: str = "INBOX"
+
+
+@dataclass
+class UI:
+    """[ui] section for `mg ui`."""
+    port: int = 8766
+    sync_minutes: float = 2.0
+    idle: bool = True
+    lang: str = "auto"  # auto | de | en
+    mark_read: bool = True  # mark a message read when it is opened
+
+
 @dataclass
 class Config:
     accounts: dict[str, Account]
@@ -119,6 +146,8 @@ class Config:
     undo_seconds: int = 0
     max_per_hour: int = 20
     rules: Rules = field(default_factory=Rules)
+    sort_rules: list[SortRule] = field(default_factory=list)
+    ui: UI = field(default_factory=UI)
 
     def mode_for(self, acct: Account) -> str:
         """Effective approval mode for an account."""
@@ -149,6 +178,30 @@ def _mode(v: str | None, where: str) -> str | None:
     return v
 
 
+def _rx(v: str, where: str) -> re.Pattern:
+    try:
+        return re.compile(v, re.I)
+    except re.error as e:
+        raise ConfigError(f"{where}: bad regex: {e}") from None
+
+
+def _sort_rules(items: list) -> list[SortRule]:
+    out = []
+    for i, t in enumerate(items or [], 1):
+        name = str(t.get("name") or f"rule {i}")
+        acts = t.get("action") or t.get("actions") or []
+        acts = [acts] if isinstance(acts, str) else list(acts)
+        for a in acts:
+            if a not in ("mark_read", "flag") and not (a.startswith("move:") and a[5:].strip()):
+                raise ConfigError(f"rules '{name}': action must be move:<folder>, mark_read or flag, not {a!r}")
+        match = {k: _rx(t[k], f"rules '{name}'") for k in RULE_MATCH if t.get(k)}
+        headers = {k: _rx(v, f"rules '{name}'") for k, v in (t.get("header") or {}).items()}
+        if not (match or headers) or not acts:
+            raise ConfigError(f"rules '{name}': needs at least one match and one action")
+        out.append(SortRule(name, match, headers, acts, t.get("account"), t.get("folder", "INBOX")))
+    return out
+
+
 def parse(data: dict) -> Config:
     """Build a Config from parsed TOML."""
     accts: dict[str, Account] = {}
@@ -167,7 +220,8 @@ def parse(data: dict) -> Config:
             password_cmd=t.get("password_cmd"), password_env=t.get("password_env"),
             folders=list(t.get("folders", ["INBOX"])), sent_folder=t.get("sent_folder", "Sent") or None,
             signature=t.get("signature", ""), reply_prefix=t.get("reply_prefix", "Re:"),
-            approval_mode=_mode(t.get("approval_mode"), f"account {name}"))
+            approval_mode=_mode(t.get("approval_mode"), f"account {name}"),
+            archive_folder=t.get("archive_folder"), trash_folder=t.get("trash_folder"))
     if not accts:
         raise ConfigError("no [accounts.NAME] section in config")
     ap = data.get("approval") or {}
@@ -196,7 +250,16 @@ def parse(data: dict) -> Config:
                   initial_days=int(sync.get("initial_days", 0)),
                   mode=_mode(ap.get("mode", "manual"), "approval") or "manual",
                   undo_seconds=max(0, int(ap.get("undo_seconds", 0))),
-                  max_per_hour=max(0, int(ap.get("max_per_hour", 20))), rules=rules)
+                  max_per_hour=max(0, int(ap.get("max_per_hour", 20))), rules=rules,
+                  sort_rules=_sort_rules(data.get("rules")), ui=_ui(data.get("ui") or {}))
+
+
+def _ui(t: dict) -> UI:
+    lang = t.get("lang", "auto")
+    if lang not in ("auto", "de", "en"):
+        raise ConfigError("ui.lang must be auto, de or en")
+    return UI(port=int(t.get("port", 8766)), sync_minutes=max(0.25, float(t.get("sync_minutes", 2))),
+              idle=bool(t.get("idle", True)), lang=lang, mark_read=bool(t.get("mark_read", True)))
 
 
 def load(path: Path | None = None) -> Config:
@@ -235,6 +298,8 @@ signature = """Jane Doe
 Example Ltd."""
 # reply_prefix = "AW:"            # used when the subject has no Re:/AW: yet
 # approval_mode = "manual"        # per-account override of approval.mode
+# archive_folder = "Archive"      # used by `mg ui` / `mg move --archive` (default: \\Archive folder)
+# trash_folder = "Trash"          # delete in the web UI moves here (default: \\Trash folder)
 
 [sync]
 max_raw_bytes = 5000000           # raw messages larger than this are not cached
@@ -261,6 +326,25 @@ reply_topic = "{reply}"
 approve_label = "Send"            # e.g. "Senden"
 reject_label = "Discard"          # e.g. "Verwerfen"
 # token_cmd = "secret-tool lookup service ntfy"   # access token for a protected server
+
+# [ui]                            # optional web client for humans: mg ui
+# port = 8766
+# sync_minutes = 2                # background sync while mg ui runs (plus IMAP IDLE on INBOX)
+# lang = "auto"                   # auto (browser language) | de | en
+# mark_read = true                # mark mail read when opened
+
+# Sorting rules, applied by `mg ui` (or `mg rules apply`) to new mail after a sync.
+# Regexes are case-insensitive. Check them first with: mg rules test
+# [[rules]]
+# name = "Newsletters"
+# list_id = 'news\\.example\\.com'   # also: from, to, subject (literal strings, no escaping)
+# action = ["mark_read", "move:Newsletter"]
+#
+# [[rules]]
+# name = "Invoices"
+# from = 'billing@example\\.net'
+# header = { "X-Priority" = "^1" }
+# action = "flag"
 '''
 
 

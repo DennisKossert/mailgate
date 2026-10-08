@@ -104,6 +104,19 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
     return _send_unattended(cfg, store, did, auto)
 
 
+def send_now(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
+             reply_msg: int | None = None, via: str = "ui") -> str:
+    """Human send from `mg ui`: record the draft and send it right away, without the approval queue."""
+    msg = BytesParser(policy=policy.default).parsebytes(mime)
+    now = int(time.time())
+    did = store.add_draft(acct=acct.name, created=now, expires=now + 600, status="pending", mime=mime,
+                          sha256=sha256(mime), token_hash=sha256(secrets.token_urlsafe(18)), sender=acct.email,
+                          rcpts=json.dumps(rcpts), to_addr=str(msg["To"] or ""), subject=str(msg["Subject"] or ""),
+                          reply_msg=reply_msg)
+    store.audit(did, "queued", via, f"{len(rcpts)} rcpt, {len(mime)} bytes, written by a human in the web UI")
+    return send_draft(cfg, store, did, via)
+
+
 def _send_unattended(cfg: Config, store: Store, did: int, via: str) -> Queued:
     d = store.draft(did)
     try:

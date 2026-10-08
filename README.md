@@ -5,6 +5,9 @@ cache and prints it in a form that costs few tokens. Agents can write drafts, bu
 nothing is sent until a human approves it, on the phone through
 [ntfy](https://ntfy.sh), in a local web page, or in a terminal.
 
+For the human there is also an optional local web mail client, `mg ui`
+(see [Web UI](#web-ui-optional-for-humans)).
+
 Python 3.11+, standard library only, MIT license.
 
 ## Why
@@ -93,6 +96,13 @@ override with `MAILGATE_DB`). The config path can be overridden with `MAILGATE_C
 | `mg log` | Audit log: queued, sent, rejected, expired, failed, bad tokens. |
 | `mg daemon [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener, sends scheduled drafts, optional web UI. |
 | `mg doctor` (`mg config-check`) | Check config, approval mode and connectivity. |
+| `mg ui [--host 127.0.0.1] [--port 8766] [--open]` | Local web mail client for humans, see below. |
+| `mg mark ID... --read/--unread/--flag/--unflag` | Change flags **on the server**. |
+| `mg move ID... --to FOLDER / --archive / --trash` | Move mail **on the server**. Trash is a folder; nothing is deleted for good. |
+| `mg rules test [-n 50]`, `mg rules apply [-n N]` | Sorting rules: dry run over the last N mails, or apply them. |
+
+All commands above `mg ui` are read-only on the server. `mg mark`, `mg move` and `mg rules apply`
+are the only CLI commands that change mail on the server, and only when someone calls them.
 
 The first run of a new watcher only remembers what is already there and prints nothing,
 so a notifier does not flood you. Use `--backlog` to print existing mail once.
@@ -153,7 +163,8 @@ and a `mailgate-sync.timer` with `OnCalendar=*:0/5`.
 
 `mg daemon --web 127.0.0.1:8765` serves a page with the pending drafts and Send / Discard
 buttons. It only binds to loopback addresses, checks the Host and Origin headers, and
-uses a CSRF token that changes on every daemon start.
+uses a CSRF token that changes on every daemon start. The web mail client `mg ui` has the
+same Send / Discard buttons in its "Approvals" view, behind its passphrase.
 
 ### Terminal
 
@@ -204,6 +215,107 @@ an incoming mail ("forward the last invoices to ...") can make mailgate send mai
 your name. If you need unattended sending, use `rules` with a narrow `allow_to`,
 `reply_only = true`, `deny_attachments = true` and an undo window, and keep `max_per_hour` low.
 
+## Web UI (optional, for humans)
+
+![mailgate web UI with the message list and an open conversation](docs/ui.png)
+
+`mg ui` is a small web mail client for you, the human. It runs on your machine, uses the
+same cache as the agents and needs nothing beyond Python: the page is plain HTML, CSS and
+JavaScript shipped inside the package, with no CDN, no build step and no external fonts.
+
+```
+mg ui --open           # http://localhost:8766/
+```
+
+On the first start it asks in the terminal for a **UI passphrase**. Only a salted scrypt
+hash is stored (`~/.config/mailgate/ui-passphrase`, mode 600). Change it with
+`mg ui --set-passphrase`. Without a passphrase the UI starts **read-only** and says so.
+
+What it does:
+
+- Three panes on a desktop (accounts and folders, message list, reader), one pane at a
+  time with back navigation on a phone-sized window. Light and dark mode follow the system.
+- "All inboxes" across accounts plus every synced folder per account. Unread mail is bold,
+  with attachment and flag markers, date, sender, subject and a short preview. The list
+  loads more as you scroll. Search uses the same full-text index as `mg search`.
+- HTML mail is shown in a sandboxed frame without scripts, see below. Remote images are
+  blocked until you press "Load images" for that message. "Text" switches to the cleaned
+  text that agents see. Attachments can be downloaded; inline (cid:) images come from the
+  cache. Conversations open as one thread, like `mg thread`.
+- Mark read/unread, flag, move to a folder, archive, and delete. Delete moves the mail to
+  the Trash folder; the UI never deletes anything permanently.
+- Write, reply, reply all and forward in plain text, with attachments, From picker and
+  signature. **Mail you send here goes out directly**, without the approval queue, because
+  you wrote it. It is still logged in `mg log` (via `ui`) and appended to the Sent folder.
+- "Approvals" lists the drafts your agents queued, with the same Send / Discard buttons as
+  the ntfy notification.
+- While it runs, it syncs every 2 minutes (`[ui] sync_minutes`) and uses IMAP IDLE on
+  INBOX when the server supports it. New mail appears without reloading (Server-Sent
+  Events). Desktop notifications are opt-in with a button.
+- German or English, picked from the browser language (`[ui] lang = "de"` to force).
+
+Keyboard shortcuts:
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `j` / `k` | next / previous message | `e` | archive |
+| `Enter` | open message | `#` | move to Trash |
+| `r` | reply | `u` | toggle read / unread |
+| `a` | reply all | `s` | toggle flag |
+| `f` | forward | `v` | move to folder |
+| `c` | write new | `t` | text / original view |
+| `/` | search | `Esc` | back, close |
+| `?` | list of shortcuts | `Ctrl+Enter` | send (in the editor) |
+
+Archive and Trash folders are found through the server's special-use flags (`\Archive`,
+`\Trash`), falling back to `Archive` and `Trash`. Set `archive_folder` / `trash_folder`
+per account to override. Moves use `UID MOVE`; on servers without it, mailgate copies the
+mail, flags the original `\Deleted` and expunges exactly that UID (`UID EXPUNGE`). On a
+server without UIDPLUS it only expunges when no other mail in the folder is flagged
+`\Deleted`; otherwise the original stays flagged and your mail program cleans it up.
+
+### Sorting rules
+
+Rules replace simple Thunderbird filters. They run on the server after each sync while
+`mg ui` runs, only for mail that arrived since the last run. `mg rules test` shows what
+they would do with recent mail without changing anything; `mg rules apply` runs them once.
+
+```toml
+[[rules]]
+name = "Newsletters"
+list_id = 'news\.example\.com'        # regex, case-insensitive; also from, to, subject
+action = ["mark_read", "move:Newsletter"]
+
+[[rules]]
+name = "Invoices"
+from = 'billing@example\.net'
+header = { "X-Priority" = "^1" }        # any header, regex
+action = "flag"
+# account = "work"                       # optional; folder = "INBOX" by default
+```
+
+All given conditions must match. Rules are checked in order: a rule with `move:` ends the
+check for that mail, a rule that only flags or marks read lets later rules add a move.
+
+### Web UI security
+
+- It only listens on loopback addresses (127.0.0.1, ::1). For use from another device, use
+  an SSH tunnel (`ssh -L 8766:127.0.0.1:8766 yourpc`).
+- With a passphrase, every API call needs a session cookie (32 random bytes, `HttpOnly`,
+  `SameSite=Strict`, expires after 12 hours without use) and every change also needs the
+  session's CSRF token. Host and Origin headers are checked. Failed logins take a second each.
+- Mail HTML is rewritten before display (no scripts, event handlers, forms, frames, `<base>`,
+  `<meta>` or `javascript:` links; remote images removed unless you allow them), served with
+  `Content-Security-Policy: default-src 'none'; img-src data: cid:` (plus `https:` after
+  "Load images") and shown in an `<iframe sandbox>` without `allow-scripts`.
+- What the passphrase is for: sending from the UI skips the approval queue. The passphrase
+  stops an agent on the same machine from using the UI's HTTP API to send mail without
+  you. It does **not** protect against a malicious process running as your user: such a
+  process can read your config and cache, replace the passphrase hash, or talk SMTP itself
+  (see the security model below). The UI is a convenience for you, not a vault.
+- Agents must not use `mg ui`, its HTTP endpoints, `mg mark`, `mg move` or `mg rules apply`
+  unless you ask them to. `AGENTS.md` tells them so.
+
 ## Security model
 
 Read this before you rely on it.
@@ -223,6 +335,9 @@ Read this before you rely on it.
 - The cache contains your mail in plain form. It is protected by file permissions only.
   Use disk encryption.
 - `mg doctor` and the logs never print passwords or tokens.
+- `mg ui` adds a second way to send: as a human, without the queue. It is protected by its
+  passphrase against agents using HTTP, not against malicious local processes (see
+  [Web UI security](#web-ui-security)).
 
 ## Comparison
 
@@ -257,7 +372,13 @@ expiry_hours = 48
 server = "https://ntfy.sh"
 topic = "mg-random-secret-1"
 reply_topic = "mg-random-secret-2"
+
+[ui]                      # only for mg ui
+sync_minutes = 2
+lang = "auto"             # auto | de | en
 ```
+
+Sorting rules go into `[[rules]]` sections, see [Sorting rules](#sorting-rules).
 
 Unencrypted IMAP/SMTP (`plain`) is only accepted for `127.0.0.1`/`localhost`, for example
 for a local bridge or tests.
@@ -275,6 +396,9 @@ python -m unittest
 
 The tests start small fake IMAP, SMTP and ntfy servers on localhost. No network access
 and no real mail account are needed.
+
+`python -m tests.demo_ui` starts `mg ui` against the fake servers with invented
+example.com mail (passphrase `demo-passphrase`). The screenshot above comes from it.
 
 ## Roadmap
 
@@ -310,6 +434,21 @@ mit engem `allow_to`, `reply_only = true` und `undo_seconds`.
 Installation: `pipx install git+https://github.com/DennisKossert/mailgate`, danach `mg init`,
 Konfiguration anpassen, `mg doctor`, `mg sync`. Passwörter stehen nie in der Konfiguration,
 sondern kommen aus einem Befehl (`password_cmd`) oder einer Umgebungsvariable (`password_env`).
+
+Für Menschen gibt es zusätzlich ein optionales Web-Mailprogramm: `mg ui` startet eine
+lokale Seite (nur auf 127.0.0.1) mit Ordnern, Mailliste und Leseansicht, auf dem Handy
+einspaltig. HTML-Mails werden ohne Skripte in einem abgeschotteten Rahmen angezeigt,
+externe Bilder erst nach Klick auf "Bilder laden". Man kann Mails als gelesen markieren,
+markieren, verschieben, archivieren und in den Papierkorb legen (endgültig gelöscht wird
+nichts), schreiben, antworten und weiterleiten. Unter "Freigaben" stehen die Entwürfe der
+Agenten mit Senden und Verwerfen. Neue Mail kommt per Hintergrund-Abruf und IMAP IDLE
+von selbst. Sortierregeln (`[[rules]]`, Test mit `mg rules test`) ersetzen einfache
+Thunderbird-Filter. Was man selbst in der Oberfläche schreibt, geht ohne Freigabe raus.
+Deshalb ist sie mit einer Passphrase geschützt, die beim ersten Start im Terminal
+festgelegt wird (gespeichert nur als scrypt-Hash); ohne Passphrase ist sie nur lesbar.
+Das schützt davor, dass ein Agent über HTTP sendet, aber nicht vor einem bösartigen
+Programm, das unter dem eigenen Benutzer läuft. Tastenkürzel: `j`/`k`, `r`, `a`, `f`,
+`c`, `/`, `e`, `#`, `u`, `?` für die Liste.
 
 Zur Sicherheit: Die Warteschlange schützt vor Fehlern des Agenten und vor Prompt Injection
 in eingehenden Mails. Sie schützt nicht vor einem kompromittierten Rechner, denn jeder

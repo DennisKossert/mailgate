@@ -268,6 +268,66 @@ def cmd_daemon(a) -> None:
     daemon.run(load(), db_path(), web=a.web, use_ntfy=not a.no_ntfy)
 
 
+# ---- explicit server-side changes (never used by sync) ------------------------------
+
+def cmd_mark(a) -> None:
+    from . import imapops
+    op = a.op or "read"
+    n = imapops.set_flag(_store(), load().accounts, [parse_id(i) for i in a.ids], op)
+    out(f"{n} marked {op}")
+
+
+def cmd_move(a) -> None:
+    from . import imapops
+    kind = "trash" if a.trash else "archive" if a.archive else None
+    if not (a.to or kind):
+        raise ValueError("give --to FOLDER, --archive or --trash")
+    n, dest = imapops.move(_store(), load().accounts, [parse_id(i) for i in a.ids], target=a.to, kind=kind)
+    out(f"{n} moved to {dest}")
+
+
+def cmd_rules(a) -> None:
+    from . import sortrules
+    cfg = load()
+    store = _store()
+    if not cfg.sort_rules:
+        return out("no [[rules]] in config")
+    if a.action == "test":
+        a.n = a.n or 50
+        hits = sortrules.plan(cfg, sortrules.recent(store, a.n))
+        for r, rule, acts in hits:
+            out(f"{b36(r['id'])} {r['acct']}/{r['folder']} {short(r['from_name'], 20)} | {short(r['subject'], 50)}"
+                f" -> {rule.name}: {', '.join(acts)}")
+        out(f"{len(hits)} of the last {a.n} mails match (dry run, nothing changed)")
+        return
+    lines = sortrules.apply(cfg, store, sortrules.recent(store, a.n)) if a.n else sortrules.apply_new(cfg, store)
+    for ln in lines:
+        out(ln)
+    out(f"applied to {len(lines)} mails")
+
+
+def cmd_ui(a) -> None:
+    import getpass
+    from . import webui
+    cfg = load()
+    pf = webui.pass_path()
+    if a.set_passphrase or (not pf.exists() and sys.stdin.isatty() and sys.stdout.isatty()):
+        if not sys.stdin.isatty():
+            raise SystemExit("setting the UI passphrase needs an interactive terminal")
+        out("The web UI can send mail without the approval queue, so it is protected by a passphrase.")
+        if not a.set_passphrase:
+            out("Leave it empty to start read-only.")
+        pw = getpass.getpass("New UI passphrase: ")
+        if pw:
+            if getpass.getpass("Repeat: ") != pw:
+                raise SystemExit("passphrases differ, nothing changed")
+            webui.set_passphrase(pw, pf)
+            out(f"stored scrypt hash in {pf}")
+        if a.set_passphrase:
+            return
+    webui.run(cfg, db_path(), a.host, a.port or cfg.ui.port, open_browser=a.open)
+
+
 # ---- setup ----------------------------------------------------------------------
 
 def cmd_init(a) -> None:
@@ -420,6 +480,25 @@ def parser() -> argparse.ArgumentParser:
     sp = cmd("daemon", cmd_daemon, "approval listener (ntfy) and optional local web UI")
     sp.add_argument("--web", metavar="HOST:PORT", help="serve approval page, e.g. 127.0.0.1:8765")
     sp.add_argument("--no-ntfy", action="store_true")
+    sp = cmd("ui", cmd_ui, "local web mail client for humans (sends without approval, passphrase protected)")
+    sp.add_argument("--host", default="127.0.0.1", help="loopback address (default 127.0.0.1)")
+    sp.add_argument("--port", type=int, help="default 8766 or [ui] port")
+    sp.add_argument("--open", action="store_true", help="open the browser")
+    sp.add_argument("--set-passphrase", action="store_true", help="set or change the UI passphrase and exit")
+    sp = cmd("mark", cmd_mark, "change flags ON THE SERVER (only when the user asked for it)")
+    sp.add_argument("ids", nargs="+")
+    g = sp.add_mutually_exclusive_group()
+    for flag in ("read", "unread", "flag", "unflag"):
+        g.add_argument(f"--{flag}", dest="op", action="store_const", const=flag)
+    sp = cmd("move", cmd_move, "move mail ON THE SERVER (only when the user asked for it)")
+    sp.add_argument("ids", nargs="+")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--to", metavar="FOLDER")
+    g.add_argument("--archive", action="store_true")
+    g.add_argument("--trash", action="store_true", help="move to Trash (never deletes permanently)")
+    sp = cmd("rules", cmd_rules, "sorting rules: test (dry run) or apply")
+    sp.add_argument("action", choices=("test", "apply"))
+    sp.add_argument("-n", type=int, default=0, help="last N mails (test default 50; apply default: new mail only)")
     sp = cmd("init", cmd_init, "write an example config")
     sp.add_argument("--force", action="store_true")
     cmd("doctor", cmd_doctor, "check config, approval mode and connectivity (never prints secrets)",

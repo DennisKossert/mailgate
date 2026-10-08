@@ -19,6 +19,13 @@ mg stats                        # counts per account/folder
 mg new WATCHER [--match REGEX]  # only mail this watcher has not seen yet
 ```
 
+Only when the user asks for it (these change mail on the server):
+
+```
+mg mark ID... --read|--unread|--flag|--unflag
+mg move ID... --to FOLDER | --archive | --trash   # trash is a folder, nothing is deleted
+```
+
 `ls` lines look like `k3f*@ 10-05 14:02 work/INBOX Jane Doe | Subject`.
 `k3f` is the id, `*` means unread, `@` means attachments.
 `--json` on ls/search/read gives compact JSON (`id d a f fr e s u at b`).
@@ -48,3 +55,9 @@ waits for approval. A draft expires after 48 hours by default.
 - If a draft was sent automatically, still tell the user what you sent, to whom and why.
 - If a rule failed, the draft waits for a human. Do not rewrite it to dodge the rule.
 - Keep output small: prefer `ls`/`search` with filters over reading many mails.
+- `mg ui` is the human's web mail client. Do not start it, do not call its HTTP endpoints
+  (`/api/...` on localhost:8766) and do not try to log in to it. It sends without approval
+  because a human is supposed to be the one using it.
+- `mg mark`, `mg move` and `mg rules apply` change mail on the server (read state, flags,
+  folders, Trash). Use them only when the user asked for exactly that. `mg sync` and all
+  read commands never change anything on the server. `mg rules test` is a safe dry run.

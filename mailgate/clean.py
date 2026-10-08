@@ -182,20 +182,24 @@ def body_text(msg: EmailMessage) -> tuple[str, str]:
     return "", ""
 
 
-def attachments(msg: EmailMessage) -> list[tuple[str, int]]:
-    """List (filename, size) of real attachments, skipping inline images."""
+def attachment_parts(msg: EmailMessage) -> list:
+    """MIME parts that are real attachments (inline cid images are skipped)."""
     out = []
     for part in msg.walk():
         if part.is_multipart():
             continue
         disp = part.get_content_disposition()
-        name = part.get_filename()
-        if not name and disp != "attachment":
+        if not part.get_filename() and disp != "attachment":
             continue
         if disp == "inline" and part.get_content_maintype() == "image" and part.get("Content-ID"):
             continue
-        out.append((name or "unnamed", len(part.get_payload(decode=True) or b"")))
+        out.append(part)
     return out
+
+
+def attachments(msg: EmailMessage) -> list[tuple[str, int]]:
+    """List (filename, size) of real attachments, skipping inline images."""
+    return [(p.get_filename() or "unnamed", len(p.get_payload(decode=True) or b"")) for p in attachment_parts(msg)]
 
 
 def _hdr(msg: EmailMessage, name: str) -> str:

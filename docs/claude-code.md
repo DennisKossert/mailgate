@@ -28,6 +28,8 @@ Use the `mg` CLI for all email. Run `mg sync` before reading if the cache may be
   or `mg reply ID --body-file FILE [--all]`
 - You can only create drafts. A human approves every send on their phone or in the web UI.
   Never run `mg approve` and never post to the ntfy reply topic or the approval web page.
+- Never use `mg ui` or its localhost HTTP API. Use `mg mark` / `mg move` only when I ask
+  you to mark or move mail.
 - After drafting, tell me the draft id and a one-line summary. If `mg draft` says
   `sent automatically` (auto/rules mode), tell me exactly what was sent and to whom.
   Check `mg log` before saying anything was sent.
@@ -46,7 +48,7 @@ behind a prompt, or allow drafting too, since nothing leaves without approval:
     "allow": ["Bash(mg ls:*)", "Bash(mg search:*)", "Bash(mg read:*)", "Bash(mg thread:*)",
               "Bash(mg sync:*)", "Bash(mg stats:*)", "Bash(mg queue:*)", "Bash(mg log:*)",
               "Bash(mg draft:*)", "Bash(mg reply:*)"],
-    "deny": ["Bash(mg approve:*)", "Bash(mg daemon:*)", "Bash(curl:*)"]
+    "deny": ["Bash(mg approve:*)", "Bash(mg daemon:*)", "Bash(mg ui:*)", "Bash(curl:*)"]
   }
 }
 ```

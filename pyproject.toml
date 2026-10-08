@@ -29,5 +29,8 @@ mg = "mailgate.cli:main"
 [tool.setuptools]
 packages = ["mailgate"]
 
+[tool.setuptools.package-data]
+mailgate = ["static/*"]
+
 [tool.setuptools.dynamic]
 version = { attr = "mailgate.__version__" }

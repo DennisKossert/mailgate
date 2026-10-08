@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>mailgate</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="loginForm" class="login-box">
+    <h1>mailgate</h1>
+    <p data-t="loginIntro"></p>
+    <label for="pass" data-t="passphrase"></label>
+    <input id="pass" type="password" autocomplete="current-password" required>
+    <button class="primary" type="submit" data-t="login"></button>
+    <p id="loginErr" class="error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" class="app" data-view="list" hidden>
+  <header class="top">
+    <button id="navBtn" class="icon only-narrow" type="button" data-label="folders" data-icon="menu"></button>
+    <span class="brand">mailgate</span>
+    <form id="searchForm" class="search" role="search">
+      <label for="q" class="sr-only" data-t="search"></label>
+      <span class="search-icon" data-icon="search" aria-hidden="true"></span>
+      <input id="q" type="search" autocomplete="off" data-ph="searchPh">
+    </form>
+    <span id="status" class="status" role="status" aria-live="polite"></span>
+    <button id="syncBtn" class="icon" type="button" data-label="syncNow" data-icon="refresh"></button>
+    <button id="composeBtn" class="primary compose-btn" type="button"><span data-icon="pen" aria-hidden="true"></span><span data-t="compose"></span></button>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+
+  <nav id="nav" class="pane nav" data-label-aria="folders"></nav>
+
+  <section id="listPane" class="pane listpane" aria-labelledby="listTitle">
+    <div class="listhead">
+      <button id="listBack" class="icon only-narrow" type="button" data-label="folders" data-icon="back"></button>
+      <h2 id="listTitle"></h2>
+      <label class="toggle"><input id="unreadOnly" type="checkbox"> <span data-t="unreadOnly"></span></label>
+    </div>
+    <ul id="list" class="list"></ul>
+    <div id="more" class="more" aria-hidden="true"></div>
+  </section>
+
+  <section id="reader" class="pane reader" aria-label="Message" tabindex="-1">
+    <div class="empty" data-t="nothingSelected"></div>
+  </section>
+</div>
+
+<dialog id="composeDlg" class="dlg compose" aria-labelledby="composeTitle">
+  <form id="composeForm" method="dialog">
+    <div class="dlg-head"><h2 id="composeTitle" data-t="newMessage"></h2>
+      <button type="button" class="icon" id="composeClose" data-label="close" data-icon="x"></button></div>
+    <div class="fields">
+      <label for="cFrom" data-t="from"></label><select id="cFrom"></select>
+      <label for="cTo" data-t="to"></label><input id="cTo" type="text" autocomplete="email" multiple>
+      <label for="cCc">Cc</label><input id="cCc" type="text">
+      <label for="cBcc">Bcc</label><input id="cBcc" type="text">
+      <label for="cSubject" data-t="subject"></label><input id="cSubject" type="text">
+    </div>
+    <label for="cBody" class="sr-only" data-t="message"></label>
+    <textarea id="cBody" spellcheck="true"></textarea>
+    <div class="compose-extra">
+      <label class="toggle"><input id="cSig" type="checkbox" checked> <span data-t="addSignature"></span></label>
+      <label class="toggle" id="cFwdWrap" hidden><input id="cFwd" type="checkbox" checked> <span data-t="fwdAtts"></span></label>
+      <label class="filebtn"><span data-icon="clip" aria-hidden="true"></span><span data-t="attach"></span>
+        <input id="cFiles" type="file" multiple class="sr-only"></label>
+      <ul id="cAtts" class="chips"></ul>
+    </div>
+    <p class="hint" data-t="sendHint"></p>
+    <p id="composeErr" class="error" role="alert"></p>
+    <div class="dlg-foot">
+      <button type="button" id="composeCancel" data-t="discard"></button>
+      <button type="button" id="composeSend" class="primary" data-t="send"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="moveDlg" class="dlg small" aria-labelledby="moveTitle">
+  <form method="dialog">
+    <h2 id="moveTitle" data-t="moveTo"></h2>
+    <label for="moveFilter" class="sr-only" data-t="folder"></label>
+    <input id="moveFilter" type="text" autocomplete="off">
+    <ul id="moveList" class="folderpick"></ul>
+    <div class="dlg-foot"><button value="cancel" data-t="cancel"></button></div>
+  </form>
+</dialog>
+
+<dialog id="helpDlg" class="dlg small" aria-labelledby="helpTitle">
+  <form method="dialog">
+    <h2 id="helpTitle" data-t="shortcuts"></h2>
+    <dl id="helpList" class="keys"></dl>
+    <div class="dlg-foot"><button value="ok" data-t="close"></button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
