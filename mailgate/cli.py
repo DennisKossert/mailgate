@@ -357,6 +357,13 @@ def cmd_ui(a) -> None:
                 raise SystemExit("passphrases differ, nothing changed")
             webui.set_passphrase(pw, pf)
             out(f"stored scrypt hash in {pf}")
+        elif a.set_passphrase:
+            out("Empty passphrase: no login. Every program and user on this computer can then read and send")
+            out("mail through the UI (it still only listens on localhost).")
+            if input("Type 'no login' to confirm: ").strip() != "no login":
+                raise SystemExit("nothing changed")
+            webui.set_passphrase("", pf)
+            out(f"UI login disabled ({pf}); run mg ui --set-passphrase again to set one")
         if a.set_passphrase:
             return
     webui.run(cfg, db_path(), a.host, a.port or cfg.ui.port, open_browser=a.open)

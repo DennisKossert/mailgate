@@ -53,13 +53,12 @@ def _scrypt(pw: str, salt: bytes, n: int = 2 ** 15) -> bytes:
 
 
 def set_passphrase(pw: str, path: Path | None = None) -> None:
-    """Store only a salted scrypt hash, mode 0600."""
-    if len(pw) < 6:
-        raise ValueError("passphrase must have at least 6 characters")
+    """Store only a salted scrypt hash, mode 0600. An empty passphrase means no login at all."""
     path = path or pass_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     salt = os.urandom(16)
-    data = json.dumps({"kdf": "scrypt", "n": 2 ** 15, "r": 8, "p": 1, "salt": salt.hex(),
+    data = json.dumps({"kdf": "none"} if not pw else
+                      {"kdf": "scrypt", "n": 2 ** 15, "r": 8, "p": 1, "salt": salt.hex(),
                        "hash": _scrypt(pw, salt).hex()})
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -67,9 +66,18 @@ def set_passphrase(pw: str, path: Path | None = None) -> None:
     os.chmod(path, 0o600)
 
 
+def no_passphrase(path: Path | None = None) -> bool:
+    try:
+        return json.loads((path or pass_path()).read_text()).get("kdf") == "none"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def check_passphrase(pw: str, path: Path | None = None) -> bool:
     try:
         d = json.loads((path or pass_path()).read_text())
+        if d.get("kdf") == "none":
+            return True
         return hmac.compare_digest(_scrypt(pw, bytes.fromhex(d["salt"]), int(d["n"])).hex(), d["hash"])
     except (OSError, ValueError, KeyError):
         return False
@@ -621,6 +629,11 @@ def make_handler(app: App, hosts: set[str]):
                 return self._send(200, f.read_bytes(), STATIC_TYPES[f.suffix])
             sess = app.session(self.headers.get("Cookie"))
             if path == "/api/state":
+                if not sess and no_passphrase(app.passfile):  # user chose no login: open a session
+                    token, csrf = app.login("")
+                    sess = app.session(f"{COOKIE}={token}")
+                    return self._json(state(app, sess), headers={
+                        "Set-Cookie": f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"})
                 return self._json(state(app, sess))
             if not sess and not app.readonly:
                 return self._err(401, "login required")

@@ -250,6 +250,9 @@ mg ui --open           # http://localhost:8766/
 On the first start it asks in the terminal for a **UI passphrase**. Only a salted scrypt
 hash is stored (`~/.config/mailgate/ui-passphrase`, mode 600). Change it with
 `mg ui --set-passphrase`. Without a passphrase the UI starts **read-only** and says so.
+If you set an *empty* passphrase with `mg ui --set-passphrase` (and confirm), there is no login:
+any program or user on this computer can then read and send mail through the UI. Host, Origin
+and CSRF checks still block other websites.
 
 What it does:
 

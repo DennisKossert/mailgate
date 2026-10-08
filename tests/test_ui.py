@@ -71,8 +71,14 @@ class PassphraseTest(Env):
         self.assertEqual(json.loads(p.read_text())["kdf"], "scrypt")
         self.assertTrue(webui.check_passphrase(PASS, p))
         self.assertFalse(webui.check_passphrase("wrong", p))
-        with self.assertRaises(ValueError):
-            webui.set_passphrase("short", p)
+
+    def test_empty_means_no_login(self):
+        p = self.dir / "ui-passphrase"
+        webui.set_passphrase("", p)
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+        self.assertTrue(webui.no_passphrase(p))
+        webui.set_passphrase(PASS, p)
+        self.assertFalse(webui.no_passphrase(p))
 
 
 class UiTest(Env):
@@ -355,3 +361,27 @@ class BindTest(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoPassphraseUiTest(UiTest):
+    passphrase = False
+
+    def setUp(self) -> None:
+        super().setUp()
+        webui.set_passphrase("", webui.pass_path())
+
+    def test_login_required(self):  # by design: no login in this mode
+        pass
+
+    def test_state_opens_session_but_csrf_and_host_still_checked(self):
+        st, hdr, data = self.req("GET", "/api/state")
+        s = json.loads(data)
+        self.assertEqual(st, 200)
+        self.assertTrue(s["auth"])
+        self.assertFalse(s["need_login"])
+        self.cookie = hdr["Set-Cookie"].split(";")[0]
+        self.assertEqual(self.js("GET", "/api/list")[0], 200)
+        self.assertEqual(self.js("POST", "/api/act", {"op": "read"}, csrf=False)[0], 403)
+        self.assertEqual(self.req("GET", "/api/state", headers={"Host": "evil.example:80"})[0], 403)
+        self.assertEqual(self.req("POST", "/api/act", {}, headers={"Origin": "http://evil.example"})[0], 403)
+
