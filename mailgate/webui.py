@@ -54,8 +54,8 @@ def _scrypt(pw: str, salt: bytes, n: int = 2 ** 15) -> bytes:
 
 def set_passphrase(pw: str, path: Path | None = None) -> None:
     """Store only a salted scrypt hash, mode 0600."""
-    if len(pw) < 8:
-        raise ValueError("passphrase must have at least 8 characters")
+    if len(pw) < 6:
+        raise ValueError("passphrase must have at least 6 characters")
     path = path or pass_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     salt = os.urandom(16)
