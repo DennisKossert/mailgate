@@ -14,6 +14,7 @@ from email.parser import BytesParser
 from email import policy
 
 from . import imapsync, smtpsend
+from .plugin import active as plugin_active, assert_not_plugin
 from .compose import preview
 from .config import Account, Config
 from .store import Store, draft_ref
@@ -81,8 +82,9 @@ def _notify(cfg: Config, store: Store, did: int, mime: bytes, token: str, note: 
 
 
 def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
-                 reply_msg: int | None = None, via: str = "cli") -> Queued:
-    """Queue a rendered message, then apply the approval mode (manual, auto or rules)."""
+                 reply_msg: int | None = None, via: str = "cli", manual: bool = False) -> Queued:
+    """Queue a rendered message, then apply the approval mode (manual, auto or rules).
+    manual=True always waits for a human (used for unsubscribe mails)."""
     token = secrets.token_urlsafe(18)
     msg = BytesParser(policy=policy.default).parsebytes(mime)
     now = int(time.time())
@@ -91,7 +93,8 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
                           sender=acct.email, rcpts=json.dumps(rcpts), to_addr=str(msg["To"] or ""),
                           subject=str(msg["Subject"] or ""), reply_msg=reply_msg)
     store.audit(did, "queued", via, f"{len(rcpts)} rcpt, {len(mime)} bytes")
-    auto, reason = decide(cfg, store, acct, rcpts, mime, reply_msg)
+    manual = manual or bool(plugin_active())  # drafts from plugin code always wait for a human
+    auto, reason = (None, "") if manual else decide(cfg, store, acct, rcpts, mime, reply_msg)
     if not auto:
         if reason:
             store.audit(did, "manual_fallback", "system", reason)
@@ -107,6 +110,7 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
 def send_now(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
              reply_msg: int | None = None, via: str = "ui") -> str:
     """Human send from `mg ui`: record the draft and send it right away, without the approval queue."""
+    assert_not_plugin("send mail")
     msg = BytesParser(policy=policy.default).parsebytes(mime)
     now = int(time.time())
     did = store.add_draft(acct=acct.name, created=now, expires=now + 600, status="pending", mime=mime,
@@ -206,6 +210,7 @@ def _get(store: Store, did: int):
 
 def send_draft(cfg: Config, store: Store, did: int, via: str, note: str = "") -> str:
     """Verify hash, send via SMTP, append to Sent, audit. Returns a status line."""
+    assert_not_plugin("send or approve a draft")
     store.expire()
     d = _get(store, did)
     if not (store.claim(did, "pending", "sending") or store.claim(did, "scheduled", "sending")):
@@ -244,6 +249,7 @@ def reject_draft(store: Store, did: int, via: str, action: str = "rejected") -> 
 
 def handle_command(cfg: Config, store: Store, text: str, via: str = "ntfy") -> str:
     """Process 'approve|reject <draft> <token>' from the reply channel."""
+    assert_not_plugin("approve a draft")
     m = CMD_RE.match(text)
     if not m:
         return "ignored: not a command"

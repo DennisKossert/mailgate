@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,18 +23,29 @@ def _xdg(var: str, default: str) -> Path:
     return Path(os.environ.get(var) or Path.home() / default)
 
 
+def app_dir(kind: str) -> Path:
+    """Per-OS base dir: 'config' or 'data'. XDG on Linux/BSD, Application Support on macOS, %APPDATA% on Windows."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "mailgate"
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "mailgate"
+    if kind == "config":
+        return _xdg("XDG_CONFIG_HOME", ".config") / "mailgate"
+    return _xdg("XDG_DATA_HOME", ".local/share") / "mailgate"
+
+
 def config_path() -> Path:
     """Config file location (MAILGATE_CONFIG overrides)."""
     if p := os.environ.get("MAILGATE_CONFIG"):
         return Path(p)
-    return _xdg("XDG_CONFIG_HOME", ".config") / "mailgate" / "config.toml"
+    return app_dir("config") / "config.toml"
 
 
 def db_path() -> Path:
     """SQLite cache location (MAILGATE_DB overrides)."""
     if p := os.environ.get("MAILGATE_DB"):
         return Path(p)
-    return _xdg("XDG_DATA_HOME", ".local/share") / "mailgate" / "mail.db"
+    return app_dir("data") / "mail.db"
 
 
 @dataclass
@@ -50,7 +62,8 @@ def _secret(cmd: str | None, env: str | None, what: str) -> str:
             raise ConfigError(f"{what}: environment variable {env} is not set")
         return val
     if cmd:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        # The user's own command from their 0600 config (pipes allowed), never built from mail data.
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)  # nosec B602
         if r.returncode != 0:
             raise ConfigError(f"{what}: command failed (exit {r.returncode})")
         return r.stdout.rstrip("\r\n")
@@ -111,6 +124,9 @@ class Rules:
 
 
 RULE_MATCH = ("from", "to", "subject", "list_id")
+RULE_KEYS = set(RULE_MATCH) | {"name", "action", "actions", "header", "account", "folder"}
+CORE_ACTIONS = ("move", "archive", "trash", "mark_read", "flag", "run")
+DEFAULT_PLUGINS = ["auth", "linkclean", "dedupe"]
 
 
 @dataclass
@@ -119,9 +135,10 @@ class SortRule:
     name: str
     match: dict[str, re.Pattern]  # from/to/subject/list_id -> regex
     headers: dict[str, re.Pattern]  # header name -> regex
-    actions: list[str]  # move:<folder> | mark_read | flag
+    actions: list[str]  # move:<folder> | archive | trash | mark_read | flag | run:<cmd> | plugin actions
     account: str | None = None
     folder: str = "INBOX"
+    extra: dict = field(default_factory=dict)  # other keys: plugin conditions and action options
 
 
 @dataclass
@@ -142,12 +159,15 @@ class Config:
     ntfy: Ntfy | None = None
     max_raw_bytes: int = 5_000_000
     initial_days: int = 0
+    sync_minutes: float = 2.0  # mg daemon --sync interval
     mode: str = "manual"
     undo_seconds: int = 0
     max_per_hour: int = 20
     rules: Rules = field(default_factory=Rules)
     sort_rules: list[SortRule] = field(default_factory=list)
     ui: UI = field(default_factory=UI)
+    plugins: list[str] = field(default_factory=lambda: list(DEFAULT_PLUGINS))
+    plugin_settings: dict[str, dict] = field(default_factory=dict)
 
     def mode_for(self, acct: Account) -> str:
         """Effective approval mode for an account."""
@@ -192,13 +212,16 @@ def _sort_rules(items: list) -> list[SortRule]:
         acts = t.get("action") or t.get("actions") or []
         acts = [acts] if isinstance(acts, str) else list(acts)
         for a in acts:
-            if a not in ("mark_read", "flag") and not (a.startswith("move:") and a[5:].strip()):
-                raise ConfigError(f"rules '{name}': action must be move:<folder>, mark_read or flag, not {a!r}")
+            kind, colon, arg = a.partition(":")
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", kind) or (kind in ("move", "run") and not arg.strip()):
+                raise ConfigError(f"rules '{name}': bad action {a!r} (move:<folder>, archive, trash, mark_read, "
+                                  "flag, run:<command> or an action of an enabled plugin)")
         match = {k: _rx(t[k], f"rules '{name}'") for k in RULE_MATCH if t.get(k)}
         headers = {k: _rx(v, f"rules '{name}'") for k, v in (t.get("header") or {}).items()}
-        if not (match or headers) or not acts:
+        extra = {k: v for k, v in t.items() if k not in RULE_KEYS}
+        if not (match or headers or extra) or not acts:
             raise ConfigError(f"rules '{name}': needs at least one match and one action")
-        out.append(SortRule(name, match, headers, acts, t.get("account"), t.get("folder", "INBOX")))
+        out.append(SortRule(name, match, headers, acts, t.get("account"), t.get("folder", "INBOX"), extra))
     return out
 
 
@@ -231,6 +254,8 @@ def parse(data: dict) -> Config:
             raise ConfigError("approval.ntfy: topic and reply_topic required")
         if n["topic"] == n["reply_topic"]:
             raise ConfigError("approval.ntfy: reply_topic must differ from topic")
+        if not re.match(r"https?://", n.get("server", "https://ntfy.sh")):
+            raise ConfigError("approval.ntfy: server must be an http(s) URL")
         ntfy = Ntfy(server=n.get("server", "https://ntfy.sh").rstrip("/"), topic=n["topic"],
                     reply_topic=n["reply_topic"], approve_label=n.get("approve_label", "Send"),
                     reject_label=n.get("reject_label", "Discard"), stop_label=n.get("stop_label", "Stop"),
@@ -241,6 +266,7 @@ def parse(data: dict) -> Config:
                   allow_accounts=list(r["allow_accounts"]) if "allow_accounts" in r else None,
                   reply_only=bool(r.get("reply_only", False)), deny_attachments=bool(r.get("deny_attachments", True)))
     sync = data.get("sync") or {}
+    pl = data.get("plugins") or {}
     default = data.get("default_account") or next(iter(accts))
     if default not in accts:
         raise ConfigError(f"default_account '{default}' is not defined")
@@ -248,10 +274,13 @@ def parse(data: dict) -> Config:
                   expiry_hours=float(ap.get("expiry_hours", 48)), ntfy=ntfy,
                   max_raw_bytes=int(sync.get("max_raw_bytes", 5_000_000)),
                   initial_days=int(sync.get("initial_days", 0)),
+                  sync_minutes=max(0.25, float(sync.get("minutes", 2))),
                   mode=_mode(ap.get("mode", "manual"), "approval") or "manual",
                   undo_seconds=max(0, int(ap.get("undo_seconds", 0))),
                   max_per_hour=max(0, int(ap.get("max_per_hour", 20))), rules=rules,
-                  sort_rules=_sort_rules(data.get("rules")), ui=_ui(data.get("ui") or {}))
+                  sort_rules=_sort_rules(data.get("rules")), ui=_ui(data.get("ui") or {}),
+                  plugins=list(pl.get("enabled", DEFAULT_PLUGINS)),
+                  plugin_settings={k: v for k, v in pl.items() if isinstance(v, dict)})
 
 
 def _ui(t: dict) -> UI:
@@ -260,6 +289,37 @@ def _ui(t: dict) -> UI:
         raise ConfigError("ui.lang must be auto, de or en")
     return UI(port=int(t.get("port", 8766)), sync_minutes=max(0.25, float(t.get("sync_minutes", 2))),
               idle=bool(t.get("idle", True)), lang=lang, mark_read=bool(t.get("mark_read", True)))
+
+
+def insecure_paths() -> list[str]:
+    """Warnings for mailgate files/dirs that other users could read or change (POSIX)."""
+    if os.name != "posix":
+        return []
+    cdir = config_path().parent
+    out = []
+    for p, want in ((cdir, 0o700), (config_path(), 0o600), (cdir / "ui-passphrase", 0o600),
+                    (cdir / "plugins.lock", 0o600), (cdir / "plugins", 0o700), (db_path().parent, 0o700),
+                    (db_path(), 0o600)):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_mode & 0o077 & ~want or st.st_uid != os.getuid():
+            out.append(f"{p} is mode {oct(st.st_mode & 0o777)[2:]}"
+                       + ("" if st.st_uid == os.getuid() else ", not owned by you") + f", run: chmod {oct(want)[2:]} {p}")
+    return out
+
+
+def append_to_config(text: str, path: Path | None = None) -> Config:
+    """Append TOML (e.g. a [[rules]] entry) to the config file after checking that the result is valid."""
+    path = path or config_path()
+    new = path.read_text().rstrip("\n") + "\n" + text
+    try:
+        cfg = parse(tomllib.loads(new))
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"would break the config: {e}") from None
+    path.write_text(new)
+    return cfg
 
 
 def load(path: Path | None = None) -> Config:
@@ -304,6 +364,7 @@ Example Ltd."""
 [sync]
 max_raw_bytes = 5000000           # raw messages larger than this are not cached
 initial_days = 90                 # first sync only fetches the last N days (0 = all)
+# minutes = 2                     # interval for `mg daemon --sync` (plus IMAP IDLE on INBOX)
 
 [approval]
 expiry_hours = 48                 # pending drafts expire after this
@@ -333,12 +394,26 @@ reject_label = "Discard"          # e.g. "Verwerfen"
 # lang = "auto"                   # auto (browser language) | de | en
 # mark_read = true                # mark mail read when opened
 
+# Plugins: mg plugins list. Bundled: auth, linkclean, dedupe (on by default),
+# unsubscribe, attachments, followup (opt-in). Single-file plugins go into plugins/ next to this file.
+# [plugins]
+# enabled = ["auth", "linkclean", "dedupe", "followup"]
+# [plugins.followup]
+# default = "3d"
+
 # Sorting rules, applied by `mg ui` (or `mg rules apply`) to new mail after a sync.
 # Regexes are case-insensitive. Check them first with: mg rules test
 # [[rules]]
 # name = "Newsletters"
 # list_id = 'news\\.example\\.com'   # also: from, to, subject (literal strings, no escaping)
 # action = ["mark_read", "move:Newsletter"]
+#
+# [[rules]]                       # needs the "attachments" plugin
+# name = "Receipts"
+# subject = 'rechnung|invoice|receipt'
+# action = ["save_attachments:~/Documents/Receipts", "flag"]
+# save_types = ["pdf"]
+# save_pattern = "{date}_{sender}_{name}"   # also {subject}, {id}
 #
 # [[rules]]
 # name = "Invoices"

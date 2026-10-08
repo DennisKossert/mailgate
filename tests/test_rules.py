@@ -89,7 +89,7 @@ class RulesTest(Env):
         base = {"accounts": {"a": {"email": "a@example.com", "imap_host": "i.example.com",
                                    "smtp_host": "s.example.com", "password_env": "X"}}}
         with self.assertRaises(ConfigError):
-            parse(dict(base, rules=[{"from": "x", "action": "delete"}]))
+            parse(dict(base, rules=[{"from": "x", "action": "no such!"}]))
         with self.assertRaises(ConfigError):
             parse(dict(base, rules=[{"action": "flag"}]))
         with self.assertRaises(ConfigError):
@@ -99,7 +99,10 @@ class RulesTest(Env):
     def test_init_example_rules_parse(self):
         import tomllib
         from mailgate.config import example
-        text = "\n".join(ln[2:] if ln.startswith(("# [[rules]]", "# name", "# list_id", "# action", "# from",
-                                                   "# header")) else ln for ln in example().splitlines())
+        lines = example().splitlines()
+        start = lines.index("# [[rules]]")
+        text = "\n".join(ln[2:] if i >= start and (ln.startswith("# [[") or " = " in ln) else ln
+                         for i, ln in enumerate(lines))
         rules = parse(tomllib.loads(text)).sort_rules
-        self.assertEqual([r.name for r in rules], ["Newsletters", "Invoices"])
+        self.assertEqual([r.name for r in rules], ["Newsletters", "Receipts", "Invoices"])
+        self.assertEqual(rules[1].extra["save_types"], ["pdf"])

@@ -139,6 +139,32 @@ svg.i { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-widt
   border-radius: var(--radius); padding: 12px 14px; overflow-wrap: anywhere; }
 .draftbox .btns { display: flex; gap: 8px; margin-top: 12px; }
 
+/* plugins */
+.badges { display: inline-flex; gap: 6px; margin-left: 10px; vertical-align: 3px; }
+.badge { font-size: 11.5px; font-weight: 600; border-radius: 10px; padding: 1px 8px; border: 1px solid var(--line);
+  color: var(--muted); white-space: nowrap; }
+.badge.ok { color: var(--ok); border-color: currentColor; }
+.badge.bad { color: var(--danger); border-color: currentColor; }
+.note.warn { background: var(--warn-bg); }
+.note.bad { border-color: var(--danger); }
+.linkwarn { font-size: 12px; color: var(--danger); margin-left: 4px; }
+.row .dup { font-size: 11px; color: var(--muted); }
+.menuwrap { position: relative; display: inline-block; }
+.menu { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 210px; display: flex; flex-direction: column;
+  background: var(--pane); border: 1px solid var(--line); border-radius: 8px; padding: 4px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.18); }
+.menu button { border: 0; text-align: left; background: none; padding: 6px 10px; white-space: nowrap; }
+.menu button:hover, .menu button:focus-visible { background: var(--sel); }
+.pvbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--line2); }
+.pvbar button { font-size: 13px; padding: 4px 10px; }
+.pvrow { display: flex; align-items: flex-start; }
+.pvrow > input { margin: 13px 0 0 12px; }
+.pvrow .row { flex: 1; }
+.pvrow.hot .who { color: var(--danger); }
+.qr { width: min(260px, 70vw); display: block; margin: 8px auto; image-rendering: pixelated; border-radius: 4px; }
+.paircmd { font: 13px var(--mono); background: var(--pane2); border: 1px solid var(--line2); border-radius: 6px;
+  padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+
 /* dialogs */
 .dlg { border: 1px solid var(--line); border-radius: 10px; padding: 0; background: var(--pane); color: var(--text);
   box-shadow: 0 20px 60px rgba(0,0,0,.25); width: min(760px, 96vw); }

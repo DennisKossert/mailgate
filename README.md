@@ -6,7 +6,8 @@ nothing is sent until a human approves it, on the phone through
 [ntfy](https://ntfy.sh), in a local web page, or in a terminal.
 
 For the human there is also an optional local web mail client, `mg ui`
-(see [Web UI](#web-ui-optional-for-humans)).
+(see [Web UI](#web-ui-optional-for-humans)). Everything beyond the core comes as
+[plugins](PLUGINS.md): phishing hints, link cleaning, unsubscribe, follow-ups and your own.
 
 Python 3.11+, standard library only, MIT license.
 
@@ -59,6 +60,8 @@ pipx install git+https://github.com/DennisKossert/mailgate
 ```
 
 or from a checkout: `pip install --user .` (or `python -m mailgate` without installing).
+`pipx install "mailgate[crypto] @ git+https://github.com/DennisKossert/mailgate"` adds the
+optional `cryptography` package, needed only for encrypted exports and device pairing.
 
 ## Quick start
 
@@ -77,6 +80,16 @@ the password, for example `secret-tool lookup service mailgate account work` or
 The cache lives in `~/.local/share/mailgate/mail.db` (respects `XDG_DATA_HOME`,
 override with `MAILGATE_DB`). The config path can be overridden with `MAILGATE_CONFIG`.
 
+On macOS both live in `~/Library/Application Support/mailgate/`, on Windows in
+`%APPDATA%\mailgate\`. Password commands there:
+
+```toml
+# macOS keychain (add it once: security add-generic-password -s mailgate -a work -w)
+password_cmd = "security find-generic-password -s mailgate -a work -w"
+# Windows, PowerShell module CredentialManager (Install-Module CredentialManager)
+password_cmd = "powershell -NoProfile -Command \"(Get-StoredCredential -Target mailgate-work).GetNetworkCredential().Password\""
+```
+
 ## Commands
 
 | Command | Purpose |
@@ -94,15 +107,20 @@ override with `MAILGATE_DB`). The config path can be overridden with `MAILGATE_C
 | `mg queue [--full]`, `mg cancel ID` | Show or withdraw pending drafts. |
 | `mg approve ID` | Send a draft from an interactive terminal (you retype the id). |
 | `mg log` | Audit log: queued, sent, rejected, expired, failed, bad tokens. |
-| `mg daemon [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener, sends scheduled drafts, optional web UI. |
+| `mg daemon [--sync] [--web 127.0.0.1:8765] [--no-ntfy]` | Approval listener, sends scheduled drafts, optional web UI. `--sync` adds headless background sync, IMAP IDLE, sorting rules and plugin tasks. |
 | `mg doctor` (`mg config-check`) | Check config, approval mode and connectivity. |
 | `mg ui [--host 127.0.0.1] [--port 8766] [--open]` | Local web mail client for humans, see below. |
 | `mg mark ID... --read/--unread/--flag/--unflag` | Change flags **on the server**. |
 | `mg move ID... --to FOLDER / --archive / --trash` | Move mail **on the server**. Trash is a folder; nothing is deleted for good. |
 | `mg rules test [-n 50]`, `mg rules apply [-n N]` | Sorting rules: dry run over the last N mails, or apply them. |
+| `mg plugins list\|info\|enable\|disable [NAME]` | Manage [plugins](PLUGINS.md). |
+| `mg events [-f]` | Local event stream as JSON lines (new mail, sync, drafts, plugins) for scripts. |
+| `mg export [-o F] [--with-secrets] [--pair]`, `mg import FILE\|CODE@HOST` | Move your setup to another device. |
+| `mg remind`, `mg snooze`, `mg unsub` | Added by the `followup` and `unsubscribe` plugins. |
 
-All commands above `mg ui` are read-only on the server. `mg mark`, `mg move` and `mg rules apply`
-are the only CLI commands that change mail on the server, and only when someone calls them.
+All commands above `mg ui` are read-only on the server. `mg mark`, `mg move`, `mg rules apply`
+and `mg unsub run` are the only CLI commands that change mail on the server or contact a sender,
+and only when someone calls them.
 
 The first run of a new watcher only remembers what is already there and prints nothing,
 so a notifier does not flood you. Use `--backlog` to print existing mail once.
@@ -217,7 +235,7 @@ your name. If you need unattended sending, use `rules` with a narrow `allow_to`,
 
 ## Web UI (optional, for humans)
 
-![mailgate web UI with the message list and an open conversation](docs/ui.png)
+![mailgate web UI: message list and a phishing mail with authentication and link warnings](docs/ui.png)
 
 `mg ui` is a small web mail client for you, the human. It runs on your machine, uses the
 same cache as the agents and needs nothing beyond Python: the page is plain HTML, CSS and
@@ -277,7 +295,8 @@ server without UIDPLUS it only expunges when no other mail in the folder is flag
 ### Sorting rules
 
 Rules replace simple Thunderbird filters. They run on the server after each sync while
-`mg ui` runs, only for mail that arrived since the last run. `mg rules test` shows what
+`mg ui` or `mg daemon --sync` runs (so sorting works without any UI), only for mail that
+arrived since the last run. `mg rules test` shows what
 they would do with recent mail without changing anything; `mg rules apply` runs them once.
 
 ```toml
@@ -294,8 +313,12 @@ action = "flag"
 # account = "work"                       # optional; folder = "INBOX" by default
 ```
 
-All given conditions must match. Rules are checked in order: a rule with `move:` ends the
-check for that mail, a rule that only flags or marks read lets later rules add a move.
+All given conditions must match. Rules are checked in order: a rule that moves the mail
+(`move:`, `archive`, `trash`) ends the check for that mail, a rule that only flags or marks
+read lets later rules add a move. Core actions: `move:<folder>`, `archive`, `trash`,
+`mark_read`, `flag` and `run:<command>` (local hook, JSON on stdin, see
+[PLUGINS.md](PLUGINS.md#without-python-run-hooks-and-events)). Plugins add conditions such as
+`auth = "fail"` and actions such as `save_attachments:~/Documents/Receipts`.
 
 ### Web UI security
 
@@ -316,9 +339,44 @@ check for that mail, a rule that only flags or marks read lets later rules add a
 - Agents must not use `mg ui`, its HTTP endpoints, `mg mark`, `mg move` or `mg rules apply`
   unless you ask them to. `AGENTS.md` tells them so.
 
+## Plugins and integrations
+
+The core stays small. Phishing hints (`auth`), link cleaning (`linkclean`) and duplicate
+hiding (`dedupe`) are bundled plugins that are on by default; `unsubscribe`, `attachments`
+and `followup` are bundled and opt-in. Your own plugin is a Python file with a `setup(mg)`
+function; see [PLUGINS.md](PLUGINS.md) for a 20-line example, the hook reference and the
+security model. Without Python, use a `run:` rule action or `mg events -f`.
+
+With `mg ui` and the bundled plugins you get: a verified / unverified / failed badge from
+the server's SPF, DKIM and DMARC results, warnings when a display name looks like a brand or
+one of your contacts but the domain does not fit, a warning next to links whose text shows
+another domain than the target (the real target appears on hover), links without tracking
+parameters, an "Unsubscribe" button plus a "Newsletters" overview, and "Follow up" / "Snooze"
+buttons with a "Follow-ups" view. `mg read` shows the same hints as one `Trust:` line.
+
+## Moving to another device
+
+```
+mg export -o mailgate.mgx                 # config, rules, signatures, watchers, pending drafts
+mg export -o mailgate.mgx --with-secrets  # plus passwords, AES-256-GCM encrypted, prints a one-time code
+mg import mailgate.mgx [--code CODE]
+```
+
+The mail cache is not exported; the new device syncs from IMAP. The UI passphrase is not
+exported either. Imported passwords go into the system keyring (`secret-tool` on Linux,
+`security` on macOS) and the config points at them; elsewhere you set `password_cmd` yourself.
+Secrets need the optional `cryptography` package; without it, `--with-secrets` refuses
+instead of writing passwords in plain text.
+
+Over the local network: `mg export --pair` (or "Transfer to another device" in `mg ui`) shows
+a QR code and a command like `mg import 7KQ4-29XF-M3PA@192.168.1.20:8767` for the other
+device. The bundle is encrypted with the one-time code, which never crosses the network.
+It works once, for 10 minutes, and locks after five wrong codes.
+
 ## Security model
 
-Read this before you rely on it.
+Read this before you rely on it. [SECURITY.md](SECURITY.md) has the full threat model and
+how to report problems.
 
 - Everything below assumes `mode = "manual"`. With auto or rules mode, the protection is
   only as good as your rules (see above).
@@ -397,6 +455,8 @@ python -m unittest
 The tests start small fake IMAP, SMTP and ntfy servers on localhost. No network access
 and no real mail account are needed.
 
+Releases are checked with `bandit` and the bypass tests in `tests/test_security.py`.
+
 `python -m tests.demo_ui` starts `mg ui` against the fake servers with invented
 example.com mail (passphrase `demo-passphrase`). The screenshot above comes from it.
 
@@ -405,6 +465,7 @@ example.com mail (passphrase `demo-passphrase`). The screenshot above comes from
 Not built yet:
 
 - MCP server wrapper exposing the read commands and `draft`/`reply` (still no send).
+- Installers / packages for macOS and Windows (config paths and password commands work already).
 - OAuth2 (XOAUTH2) for Gmail and Outlook.
 - Sieve rule management.
 
@@ -449,6 +510,26 @@ festgelegt wird (gespeichert nur als scrypt-Hash); ohne Passphrase ist sie nur l
 Das schützt davor, dass ein Agent über HTTP sendet, aber nicht vor einem bösartigen
 Programm, das unter dem eigenen Benutzer läuft. Tastenkürzel: `j`/`k`, `r`, `a`, `f`,
 `c`, `/`, `e`, `#`, `u`, `?` für die Liste.
+
+Seit 0.4 bleibt der Kern klein, alles Weitere sind Plugins (`mg plugins list`). Mitgeliefert
+und standardmäßig an: `auth` (Prüfsiegel aus SPF/DKIM/DMARC, Warnung bei Absendernamen, die
+wie eine Marke oder ein Kontakt aussehen, aber von einer anderen Domain kommen, und bei Links,
+deren Text eine andere Adresse zeigt als das Ziel), `linkclean` (entfernt Tracking-Parameter
+wie utm_* aus Links) und `dedupe` (dieselbe Mail nur einmal in "Alle Posteingänge").
+Mitgeliefert, aber nur auf Wunsch: `unsubscribe` (Knopf "Abmelden" und eine Newsletter-Übersicht,
+abgemeldet wird nur per https und erst nach Klick), `attachments` (Regel-Aktion, die z. B.
+Rechnungs-PDFs in einen Ordner speichert) und `followup` (Wiedervorlage mit `mg remind`,
+Zurückstellen mit `mg snooze`, Benachrichtigung per ntfy). Eigene Plugins sind kleine
+Python-Dateien; sie werden erst nach `mg plugins enable` geladen, mit festgehaltener Prüfsumme.
+Plugins, Regeln und `run:`-Hooks können nie selbst senden, nur Entwürfe anlegen. Ohne Python
+geht es mit `run:` in Regeln oder `mg events -f` (Ereignisse als JSON-Zeilen).
+
+`mg daemon --sync` holt Mails im Hintergrund ab und sortiert nach den Regeln, auch ohne
+Oberfläche. Umzug auf ein anderes Gerät: `mg export` und `mg import` (Konfiguration, Regeln,
+Signaturen, Beobachter, offene Entwürfe; der Mail-Cache wird neu geladen). Passwörter nur mit
+`--with-secrets`, verschlüsselt mit einem Einmal-Code (braucht das optionale Paket
+`cryptography`). Im lokalen Netz geht es per `mg export --pair` oder "Auf anderes Gerät
+übertragen" in `mg ui` mit QR-Code, einmalig und 10 Minuten gültig.
 
 Zur Sicherheit: Die Warteschlange schützt vor Fehlern des Agenten und vor Prompt Injection
 in eingehenden Mails. Sie schützt nicht vor einem kompromittierten Rechner, denn jeder

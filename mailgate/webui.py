@@ -27,10 +27,11 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, approve, compose, imapops, imapsync, sortrules
-from .clean import attachment_parts
+from . import __version__, approve, compose, imapops, imapsync, plugin
+from .clean import attachment_parts, html_body
 from .config import LOOPBACK, Config, config_path
-from .store import Store, b36, draft_ref, parse_id
+from .store import b36, draft_ref, parse_id
+from .syncer import Syncer, log
 
 STATIC = Path(__file__).parent / "static"
 STATIC_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
@@ -39,11 +40,6 @@ MAX_POST = 40_000_000  # compose uploads are base64 JSON
 COOKIE = "mg_ui"
 APP_CSP = ("default-src 'self'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'none'; "
            "form-action 'self'; frame-ancestors 'none'")
-
-
-def log(msg: str) -> None:
-    import sys
-    print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, file=sys.stderr, flush=True)
 
 
 # ---- passphrase -------------------------------------------------------------------
@@ -88,32 +84,44 @@ URL_ATTRS = {"href", "src", "background", "action", "formaction", "poster", "cit
 REMOTE_CSS = re.compile(r"url\(\s*['\"]?\s*(?:https?:)?//", re.I)
 
 
+LinkHook = "Callable[[str, str], tuple[str, list[str]]]"
+
+
 class _Sanitizer(HTMLParser):
-    def __init__(self, cids: dict[str, str], images: bool):
+    def __init__(self, cids: dict[str, str], images: bool, link=None):
         super().__init__(convert_charrefs=True)
-        self.cids, self.images = cids, images
+        self.cids, self.images, self.linkhook = cids, images, link
         self.out: list[str] = []
         self.skip = 0
         self.blocked = 0
         self.in_style = False
+        self.warnings: list[str] = []
+        self.link: list | None = None  # [href, text parts, index in out] of the open <a>
 
     def _attrs(self, tag: str, attrs: list) -> str:
         out = []
         for k, v in attrs:
-            k, v = k.lower(), v or ""
-            if k.startswith("on") or k in ("srcset", "ping", "formaction", "action", "http-equiv"):
+            k, v = k.lower(), (v or "").replace("\0", "")  # NUL is our placeholder marker
+            if not re.fullmatch(r"[a-z][a-z0-9_:-]*", k) or k.startswith("on") or k in ("srcset", "ping", "formaction", "action", "http-equiv", "title"):
                 continue
-            if k in URL_ATTRS:
+            if k == "href":
+                v = v.strip()
+                low = v.lower()
+                if not low.startswith(("http://", "https://", "mailto:", "#")):
+                    continue
+                if tag == "a" and low.startswith(("http://", "https://")):
+                    self.link = [v, [], None]
+                    out.append("\0LINK\0")  # href + title are filled in when </a> shows the link text
+                    continue
+            elif k in URL_ATTRS:
                 low = v.strip().lower()
                 if low.startswith("cid:"):
                     v = self.cids.get(v.strip()[4:].strip("<>"), "")
-                elif low.startswith(("http://", "https://", "//")) and k != "href":
+                elif low.startswith(("http://", "https://", "//")):
                     if not self.images:
                         self.blocked += 1
                         continue
-                elif k == "href" and not low.startswith(("http://", "https://", "mailto:", "#")):
-                    continue
-                elif k != "href" and not low.startswith("data:image/"):
+                elif not low.startswith("data:image/"):
                     continue
             if k == "style" and REMOTE_CSS.search(v) and not self.images:
                 self.blocked += 1
@@ -128,11 +136,31 @@ class _Sanitizer(HTMLParser):
             return
         if self.skip or tag in DROP_TAG:
             return
+        if tag == "a":
+            self._finish_link()
         self.in_style = tag == "style" and not close
         self.out.append(f"<{tag}{self._attrs(tag, attrs)}{' /' if close else ''}>")
+        if self.link and self.link[2] is None:
+            self.link[2] = len(self.out) - 1
 
     def handle_startendtag(self, tag: str, attrs: list) -> None:
         self.handle_starttag(tag, attrs, close=True)
+
+    def _finish_link(self) -> None:
+        """Let plugins rewrite the href (link cleaning) and add warnings; show the real target on hover."""
+        if not self.link or self.link[2] is None:
+            self.link = None
+            return
+        href, text, idx = self.link
+        self.link = None
+        warn: list[str] = []
+        if self.linkhook:
+            href, warn = self.linkhook(href, " ".join("".join(text).split()))
+        attr = f' href="{html.escape(href)}" title="{html.escape(href)}"'
+        self.out[idx] = self.out[idx].replace("\0LINK\0", attr, 1)
+        for w in warn:
+            self.warnings.append(w)
+            self.out.append(f'<span style="{WARN_CSS}">&#9888; {html.escape(w)}</span>')
 
     def handle_endtag(self, tag: str) -> None:
         if tag in DROP_ALL:
@@ -140,6 +168,8 @@ class _Sanitizer(HTMLParser):
         elif not self.skip and tag not in DROP_TAG:
             self.in_style = False
             self.out.append(f"</{tag}>")
+            if tag == "a":
+                self._finish_link()
 
     def handle_data(self, data: str) -> None:
         if self.skip:
@@ -149,26 +179,38 @@ class _Sanitizer(HTMLParser):
                 self.blocked += 1
             self.out.append(data.replace("</", "<\\/"))
         else:
+            if self.link:
+                self.link[1].append(data)
             self.out.append(html.escape(data, quote=False))
 
 
+WARN_CSS = ("font:12px system-ui,sans-serif;color:#8a2a1c;background:#fde8e4;border-radius:3px;"
+            "padding:0 4px;margin-left:3px;white-space:nowrap")
 BASE_CSS = ("html{color-scheme:light}body{margin:0;padding:16px;font:15px/1.5 system-ui,sans-serif;"
             "color:#1c1c1c;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}"
-            "pre{white-space:pre-wrap}")
+            "pre{white-space:pre-wrap}a[title]:hover::after,a[title]:focus::after{content:' \\2192  ' attr(title);"
+            "font:12px system-ui,sans-serif;color:#444;background:#eef0f2;border-radius:3px;padding:0 4px;"
+            "margin-left:3px;overflow-wrap:anywhere}")
 
 
-def sanitize(markup: str, cids: dict[str, str] | None = None, images: bool = False) -> tuple[str, int]:
+def sanitize(markup: str, cids: dict[str, str] | None = None, images: bool = False,
+             link=None) -> tuple[str, int]:
     """Rewrite mail HTML into a standalone document without scripts, forms or remote loads.
 
     Returns (document, number of blocked remote images). The CSP from mail_csp() is the second
-    line of defence; the iframe sandbox the third.
+    line of defence; the iframe sandbox the third. link(href, text) -> (href, warnings) comes
+    from plugins (link cleaning, misleading-link warnings); it only returns text, never markup.
     """
-    p = _Sanitizer(cids or {}, images)
+    p = _Sanitizer(cids or {}, images, link)
     try:
         p.feed(markup)
         p.close()
     except Exception:
         pass
+    p._finish_link()
+    for i, part in enumerate(p.out):  # unclosed links without text
+        if "\0LINK\0" in part:
+            p.out[i] = part.replace("\0LINK\0", "")
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><base target="_blank">'
            f"<style>{BASE_CSS}</style></head><body>{''.join(p.out)}</body></html>")
     return doc, p.blocked
@@ -188,16 +230,6 @@ def parse_raw(cfg: Config, row) -> EmailMessage:
     if raw is None:
         raw = imapsync.fetch_raw(cfg.account(row["acct"]), row["folder"], row["uid"])
     return BytesParser(policy=policy.default).parsebytes(bytes(raw))
-
-
-def html_body(msg: EmailMessage) -> str | None:
-    part = msg.get_body(preferencelist=("html",))
-    if part is None or part.get_content_type() != "text/html":
-        return None
-    try:
-        return part.get_content()
-    except Exception:
-        return (part.get_payload(decode=True) or b"").decode(part.get_content_charset() or "utf-8", "replace")
 
 
 def cid_images(msg: EmailMessage) -> dict[str, str]:
@@ -244,25 +276,19 @@ class Events:
 
 # ---- application state -----------------------------------------------------------------------
 
-class App:
+class App(Syncer):
     def __init__(self, cfg: Config, db: Path, passfile: Path | None = None):
-        self.cfg, self.db = cfg, db
+        self.events = Events()
+        super().__init__(cfg, db, cfg.ui.sync_minutes, self.events.publish)
         self.passfile = passfile or pass_path()
         self.sessions: dict[str, dict] = {}
-        self.events = Events()
         self.login_lock = threading.Lock()
-        self.sync_lock = threading.Lock()
-        self.wake = threading.Event()
         self.folder_cache: dict[str, tuple[float, list[str]]] = {}
-        self.last_sync = 0
-        self.last_error = ""
+        self.pairing = None
 
     @property
     def readonly(self) -> bool:
         return not self.passfile.exists()
-
-    def store(self) -> Store:
-        return Store(self.db)
 
     # sessions
     def login(self, pw: str) -> tuple[str, str] | None:
@@ -291,47 +317,6 @@ class App:
 
     def logout(self, token: str) -> None:
         self.sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
-
-    # sync
-    def sync(self) -> int:
-        """Sync all accounts, apply sorting rules, publish an event. Returns new message count."""
-        with self.sync_lock:
-            store, total, errors = self.store(), 0, []
-            for acct in self.cfg.accounts.values():
-                try:
-                    total += imapsync.sync_account(store, acct, None, self.cfg.max_raw_bytes, self.cfg.initial_days,
-                                                   log=lambda s: errors.append(s) if " error: " in s else None)
-                except Exception as e:
-                    errors.append(f"{acct.name}: {e}")
-            try:  # [[rules]] come from the config file (the user), so they run even in read-only mode
-                for line in sortrules.apply_new(self.cfg, store):
-                    log(f"rules: {line}")
-            except Exception as e:
-                errors.append(f"rules: {e}")
-            self.last_sync, self.last_error = int(time.time()), "; ".join(errors)[:300]
-            for e in errors:
-                log(f"sync: {e}")
-            self.events.publish({"t": "sync", "new": total, "err": self.last_error})
-            return total
-
-    def sync_loop(self, stop: threading.Event) -> None:
-        while not stop.is_set():
-            self.sync()
-            self.wake.wait(self.cfg.ui.sync_minutes * 60)
-            self.wake.clear()
-
-    def idle_loop(self, acct, stop: threading.Event) -> None:
-        delay = 5.0
-        while not stop.is_set():
-            started = time.time()
-            try:
-                imapops.idle(acct, self.wake.set, stop)
-                if time.time() - started < 5:
-                    return  # no IDLE support
-            except Exception as e:
-                log(f"idle {acct.name}: {e}")
-            stop.wait(delay)
-            delay = 5.0 if time.time() - started > 120 else min(delay * 2, 300)
 
     def drafts_loop(self, stop: threading.Event) -> None:
         """Tell the page when agents queue or the approval daemon resolves drafts."""
@@ -370,7 +355,34 @@ def state(app: App, sess: dict | None) -> dict:
             "need_login": not app.readonly and not sess, "csrf": sess["csrf"] if sess else "",
             "mark_read": app.cfg.ui.mark_read, "accounts": accounts if (sess or app.readonly) else [],
             "default": app.cfg.default_account, "drafts": len(store.pending()) if (sess or app.readonly) else 0,
-            "last_sync": app.last_sync, "error": app.last_error}
+            "last_sync": app.last_sync, "error": app.last_error,
+            "plugins": plugin_ui(app) if (sess or app.readonly) else {"views": [], "actions": []},
+            "pairing": migrate_available()}
+
+
+def migrate_available() -> bool:
+    from .migrate import have_crypto
+    return have_crypto()
+
+
+def plugin_ui(app: App) -> dict:
+    """UI extension points as JSON: sidebar views (with badge counts) and message actions."""
+    reg = app.reg
+    views = []
+    for v in reg.ui_views:
+        api = _api(app, v.plugin)
+        badge = reg.call(api, v.badge, default=0) if v.badge else 0
+        views.append({"plugin": v.plugin, "id": v.id, "label": v.label, "icon": v.icon, "badge": badge or 0,
+                      "actions": [{"id": a.id, "label": a.label, "choices": a.choices, "confirm": a.confirm}
+                                  for a in v.actions]})
+    acts = [{"plugin": a.plugin, "id": a.id, "label": a.label, "choices": a.choices, "confirm": a.confirm,
+             "icon": a.icon} for a in reg.ui_actions]
+    return {"views": views, "actions": acts}
+
+
+def _api(app: App, name: str):
+    """The PluginAPI object of a loaded plugin."""
+    return app.reg.apis[name]
 
 
 def list_msgs(app: App, q: dict) -> dict:
@@ -382,9 +394,12 @@ def list_msgs(app: App, q: dict) -> dict:
         before = (int(d), parse_id(i))
     f = {"acct": q.get("acct") or None, "folder": q.get("folder") or None, "unread": q.get("unread") == "1",
          "before": before}
-    extra = ", substr(m.body, 1, 200) AS pv, m.flags"
+    extra = ", substr(m.body, 1, 200) AS pv, m.flags, m.msgid"
     rows = store.search(q["q"], limit=n, extra=extra, **f) if q.get("q") else store.list(limit=n, extra=extra, **f)
-    items = [item(r) for r in rows]
+    items = [item(r) | {"mi": r["msgid"]} for r in rows]
+    view = {"kind": "search" if q.get("q") else "folder" if q.get("acct") else "unified",
+            "acct": q.get("acct") or None, "folder": q.get("folder") or None, "q": q.get("q") or None}
+    items = app.reg.filter_list(items, view)
     nxt = f"{rows[-1]['date']}.{b36(rows[-1]['id'])}" if len(rows) == n else ""
     return {"items": items, "next": nxt}
 
@@ -397,6 +412,21 @@ def message(app: App, rid: int) -> dict:
     msg = parse_raw(app.cfg, r)
     markup = html_body(msg)
     blocked = sanitize(markup)[1] if markup else 0
+    reg = app.reg
+    links = {}
+    for url in list(dict.fromkeys(re.findall(r"https?://[^\s<>\"')\]]+", r["full"] or "")))[:200]:
+        new, warn = reg.link(url, url)
+        if new != url or warn:
+            links[url] = {"href": new, "warn": warn}
+    pmsg = None
+    acts = []
+    for a in reg.ui_actions:
+        if a.when is not None:
+            api = _api(app, a.plugin)
+            pmsg = pmsg or plugin.Msg(api, r)
+            if not reg.call(api, a.when, pmsg, default=False):
+                continue
+        acts.append(f"{a.plugin}/{a.id}")
     atts = [{"n": i, "name": p.get_filename() or "unnamed", "size": len(p.get_payload(decode=True) or b""),
              "type": p.get_content_type()} for i, p in enumerate(attachment_parts(msg))]
     flags = r["flags"] or ""
@@ -404,7 +434,8 @@ def message(app: App, rid: int) -> dict:
             "addr": r["from_addr"], "to": r["to_addr"], "cc": r["cc"], "reply_to": r["reply_to"], "d": r["date"],
             "s": r["subject"], "u": r["unread"], "fl": int("\\Flagged" in flags), "text": r["body"],
             "full": r["full"], "html": bool(markup), "remote": blocked, "atts": atts,
-            "thread": len(store.thread(rid)), "msgid": r["msgid"]}
+            "thread": len(store.thread(rid)), "msgid": r["msgid"], "render": reg.render(r), "links": links,
+            "actions": acts}
 
 
 FWD_RE = re.compile(r"^\s*(fwd?|wg|tr)\s*:", re.I)
@@ -484,6 +515,56 @@ def send(app: App, body: dict) -> dict:
     return {"ok": res}
 
 
+def plugin_view(app: App, name: str, vid: str, q: dict) -> dict:
+    for v in app.reg.ui_views:
+        if v.plugin == name and v.id == vid:
+            res = app.reg.call(_api(app, name), v.fn, q, default=None)
+            if res is None:
+                raise ValueError(f"plugin {name}: view failed (see log)")
+            return res
+    raise LookupError("no such view")
+
+
+def plugin_action(app: App, name: str, aid: str, body: dict) -> dict:
+    for a in app.reg.ui_actions:
+        if a.plugin == name and a.id == aid:
+            api = _api(app, name)
+            row = app.store().get(parse_id(str(body.get("id", ""))))
+            if not row:
+                raise LookupError("no such message")
+            res = app.reg.call(api, a.fn, plugin.Msg(api, row), body.get("choice"), default=None)
+            if res is None:
+                raise ValueError(f"plugin {name}: action failed (see log)")
+            return {"ok": str(res)}
+    raise LookupError("no such action")
+
+
+def plugin_view_action(app: App, name: str, vid: str, aid: str, body: dict) -> dict:
+    for v in app.reg.ui_views:
+        if v.plugin == name and v.id == vid:
+            for a in v.actions:
+                if a.id == aid:
+                    keys = [str(k) for k in body.get("keys") or []]
+                    res = app.reg.call(_api(app, name), a.fn, keys, body.get("choice"), default=None)
+                    if res is None:
+                        raise ValueError(f"plugin {name}: action failed (see log)")
+                    return {"ok": str(res)}
+    raise LookupError("no such action")
+
+
+def start_pairing(app: App) -> dict:
+    """'Transfer to another device': LAN pairing with secrets, started by a logged-in human."""
+    from . import migrate
+    if app.pairing and app.pairing.state == "waiting":
+        p = app.pairing
+    else:
+        p = migrate.Pairing(migrate.bundle(app.cfg, app.store(), with_secrets=True))
+        p.start()
+        app.pairing = p
+        log(f"ui: pairing started on {p.host}:{p.port} (10 minutes, single use)")
+    return {"code": p.code, "url": p.url, "host": p.host, "port": p.port, "qr": migrate.qr_matrix(p.url)}
+
+
 def draft_action(app: App, ref: str, do: str) -> dict:
     store = app.store()
     did = parse_id(ref, draft=True)
@@ -550,6 +631,8 @@ def make_handler(app: App, hosts: set[str]):
                     return self._json(drafts(app))
                 if path == "/api/folders":
                     return self._json(app.server_folders(q.get("acct", "")))
+                if m := re.fullmatch(r"/api/plugin/(\w+)/view/(\w+)", path):
+                    return self._json(plugin_view(app, m.group(1), m.group(2), q))
                 if m := re.fullmatch(r"/api/compose/([0-9a-z]+)", path):
                     return self._json(compose_fields(app, parse_id(m.group(1)), q.get("mode", "reply")))
                 m = re.fullmatch(r"/api/(msg|thread)/([0-9a-z]+)(?:/(html|att/(\d+)))?", path)
@@ -566,7 +649,7 @@ def make_handler(app: App, hosts: set[str]):
                 msg = parse_raw(app.cfg, r)
                 if m.group(3) == "html":
                     images = q.get("images") == "1"
-                    doc, _ = sanitize(html_body(msg) or "", cid_images(msg), images)
+                    doc, _ = sanitize(html_body(msg) or "", cid_images(msg), images, app.reg.link)
                     return self._send(200, doc, "text/html", {"Content-Security-Policy": mail_csp(images),
                                                               "X-Frame-Options": "SAMEORIGIN"})
                 parts = attachment_parts(msg)
@@ -615,8 +698,9 @@ def make_handler(app: App, hosts: set[str]):
                 return self._err(403, "bad host or origin")
             try:
                 body = json.loads(raw or b"{}")
-                assert isinstance(body, dict)
-            except (ValueError, AssertionError):
+            except ValueError:
+                return self._err(400, "bad json")
+            if not isinstance(body, dict):
                 return self._err(400, "bad json")
             path = self.path
             if path == "/api/login":
@@ -643,6 +727,12 @@ def make_handler(app: App, hosts: set[str]):
                 if path == "/api/sync":
                     app.wake.set()
                     return self._json({"ok": "sync started"})
+                if m := re.fullmatch(r"/api/plugin/(\w+)/action/(\w+)", path):
+                    return self._json(plugin_action(app, m.group(1), m.group(2), body))
+                if m := re.fullmatch(r"/api/plugin/(\w+)/view/(\w+)/(\w+)", path):
+                    return self._json(plugin_view_action(app, m.group(1), m.group(2), m.group(3), body))
+                if path == "/api/pair":
+                    return self._json(start_pairing(app))
                 if m := re.fullmatch(r"/api/drafts/(d[0-9a-z]+)", path):
                     return self._json(draft_action(app, m.group(1), body.get("do", "")))
                 return self._err(404, "not found")
@@ -678,13 +768,12 @@ def run(cfg: Config, db: Path, host: str, port: int, open_browser: bool = False)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *a: (stop.set(), app.wake.set()))
     url = f"http://{'localhost' if host in ('127.0.0.1', 'localhost') else '[::1]'}:{srv.server_address[1]}/"
+    from .config import insecure_paths
+    for w in insecure_paths():
+        log(f"warning: {w}")
     log(f"mailgate ui on {url} ({'READ-ONLY, no passphrase set' if app.readonly else 'login required'})")
     threads = [threading.Thread(target=srv.serve_forever, daemon=True),
-               threading.Thread(target=app.sync_loop, args=(stop,), daemon=True),
-               threading.Thread(target=app.drafts_loop, args=(stop,), daemon=True)]
-    if cfg.ui.idle:
-        threads += [threading.Thread(target=app.idle_loop, args=(a, stop), daemon=True)
-                    for a in cfg.accounts.values() if "INBOX" in a.folders]
+               threading.Thread(target=app.drafts_loop, args=(stop,), daemon=True)] + app.threads(stop, cfg.ui.idle)
     for t in threads:
         t.start()
     if open_browser:

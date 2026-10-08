@@ -19,6 +19,9 @@ classifiers = [
     "Topic :: Communications :: Email",
 ]
 
+[project.optional-dependencies]
+crypto = ["cryptography>=41"]   # encrypted mg export --with-secrets and LAN pairing
+
 [project.urls]
 Homepage = "https://github.com/DennisKossert/mailgate"
 Issues = "https://github.com/DennisKossert/mailgate/issues"
@@ -27,7 +30,7 @@ Issues = "https://github.com/DennisKossert/mailgate/issues"
 mg = "mailgate.cli:main"
 
 [tool.setuptools]
-packages = ["mailgate"]
+packages = ["mailgate", "mailgate.plugins"]
 
 [tool.setuptools.package-data]
 mailgate = ["static/*"]

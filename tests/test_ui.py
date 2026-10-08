@@ -2,7 +2,6 @@ import base64
 import http.client
 import json
 import os
-import re
 import threading
 import time
 import unittest
@@ -276,6 +275,49 @@ class UiTest(Env):
         r.fp.readline()
         self.assertEqual(json.loads(r.fp.readline()[6:]), {"t": "drafts", "n": 0})
         c.close()
+
+
+class PluginUiTest(UiTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.srv.shutdown()
+        self.srv.server_close()
+        with open(self.dir / "config.toml", "a") as f:
+            f.write('\n[plugins]\nenabled = ["auth", "linkclean", "followup"]\n')
+        from mailgate.config import load
+        self.cfg = load()
+        self.srv, self.app = webui.server(self.cfg, self.dir / "mail.db", "127.0.0.1", 0)
+        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
+        self.port = self.srv.server_address[1]
+
+    def test_plugin_extension_points(self):
+        self.assertEqual(self.js("POST", "/api/plugin/followup/action/remind", {"id": "1"})[0], 401)
+        self.assertEqual(self.js("POST", "/api/pair", {})[0], 401)
+        self.login()
+        st, d = self.js("GET", "/api/state")
+        self.assertEqual([v["id"] for v in d["plugins"]["views"]], ["followups"])
+        self.assertIn("remind", [a["id"] for a in d["plugins"]["actions"]])
+        st, m = self.js("GET", "/api/msg/2")
+        self.assertIn("followup/remind", m["actions"])
+        self.assertEqual(m["render"]["badges"][0]["key"], "auth_none")
+        self.assertEqual(self.js("POST", "/api/plugin/followup/action/remind", {"id": "1", "choice": "1d"},
+                                 csrf=False)[0], 403)
+        st, d = self.js("POST", "/api/plugin/followup/action/remind", {"id": "1", "choice": "1d"})
+        self.assertEqual(st, 200, d)
+        self.assertIn("reminder set", d["ok"])
+        st, v = self.js("GET", "/api/plugin/followup/view/followups")
+        self.assertEqual(v["items"][0]["title"], "Termin")
+        st, d = self.js("POST", "/api/plugin/followup/view/followups/done", {"keys": [v["items"][0]["key"]]})
+        self.assertIn("done", d["ok"])
+        self.assertEqual(self.js("GET", "/api/plugin/followup/view/followups")[1]["items"], [])
+        self.assertEqual(self.js("GET", "/api/plugin/nope/view/x")[0], 404)
+        _, _, doc = self.req("GET", "/api/msg/2/html")
+        self.assertIn('href="https://example.com/x" title="https://example.com/x"', doc.decode())
+
+    # parent tests already ran with the default plugin set
+    test_login_required = test_csrf_host_origin_and_expiry = test_list_msg_html_att = None
+    test_archive_trash_move = test_send_reply_without_queue = test_forward_with_attachments = None
+    test_approvals = test_sync_event = None
 
 
 class ReadOnlyUiTest(UiTest):

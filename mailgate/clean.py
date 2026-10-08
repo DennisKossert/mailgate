@@ -182,6 +182,16 @@ def body_text(msg: EmailMessage) -> tuple[str, str]:
     return "", ""
 
 
+def html_body(msg: EmailMessage) -> str | None:
+    part = msg.get_body(preferencelist=("html",))
+    if part is None or part.get_content_type() != "text/html":
+        return None
+    try:
+        return part.get_content()
+    except Exception:
+        return (part.get_payload(decode=True) or b"").decode(part.get_content_charset() or "utf-8", "replace")
+
+
 def attachment_parts(msg: EmailMessage) -> list:
     """MIME parts that are real attachments (inline cid images are skipped)."""
     out = []

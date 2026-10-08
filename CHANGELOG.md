@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.0 (2026-10-08)
+
+Small core, plugins for the rest, and a security pass.
+
+- Plugin system (`api_version = 1`, stdlib only): bundled plugins, single files in the config
+  folder's `plugins/`, and pip packages (entry point group `mailgate.plugins`). Enabled per
+  config (`[plugins] enabled`, settings in `[plugins.<name>]`); `mg plugins list|info|enable|disable`.
+  Hooks: message synced (metadata), new mail, render (badges/banners/`mg read` lines), link filter,
+  list filter, scheduled ticks, rule conditions and actions, CLI commands, UI message actions and
+  sidebar views (as JSON, no script injection). See PLUGINS.md.
+- Security invariant in the core: plugins, rules and run hooks can only create drafts. Every send
+  path refuses while plugin code runs; plugin drafts always wait for a human, even in auto mode.
+- Non-bundled plugins load only after `mg plugins enable` (interactive), which pins their SHA-256;
+  changed, foreign-owned or group/world-writable plugin files are refused. Plugin errors are
+  isolated and logged.
+- Bundled plugins: `auth` (SPF/DKIM/DMARC badge, look-alike sender and misleading-link warnings,
+  `Trust:` line in `mg read`), `linkclean` (tracking parameters), `dedupe` (same Message-ID once in
+  unified views) on by default; `unsubscribe` (RFC 8058 one-click, https only and only on click,
+  mailto as approval-bound draft, Newsletters view, `mg unsub`), `attachments`
+  (`save_attachments:<dir>` with safe names and SHA-256 dedupe), `followup` (`mg remind`, `mg snooze`,
+  Follow-ups view, ntfy when due) opt-in.
+- `mg daemon --sync`: headless background sync with IMAP IDLE, sorting rules and plugin ticks.
+- Rules: core actions `archive`, `trash`, `run:<command>` (no shell, JSON on stdin, reduced
+  environment, timeout); plugin conditions and actions.
+- `mg events [-f]`: local event stream as JSON lines.
+- `mg export` / `mg import`: config, rules, signatures, watcher state, pending drafts, plugin data;
+  `--with-secrets` encrypts with AES-256-GCM and a one-time code (optional `cryptography`, refuses
+  otherwise); `--pair` / "Transfer to another device" serves it once over the LAN with QR code
+  (vendored Nayuki QR encoder, MIT). Imported passwords go to the system keyring.
+- Config and data folders per OS (XDG, macOS Application Support, Windows %APPDATA%); files created
+  0600, folders 0700, with warnings in `mg doctor`, `mg ui` and `mg daemon`.
+- Fixes from the security review: attribute names in mail HTML are validated, NUL bytes stripped;
+  ntfy server must be http(s); export/config files get mode 600 even when they existed; JSON body
+  type checked without `assert`.
+- SECURITY.md, PLUGINS.md, examples/hello_plugin.py.
+
 ## 0.3.0 (2026-10-08)
 
 Optional web mail client for humans.

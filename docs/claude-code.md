@@ -48,7 +48,8 @@ behind a prompt, or allow drafting too, since nothing leaves without approval:
     "allow": ["Bash(mg ls:*)", "Bash(mg search:*)", "Bash(mg read:*)", "Bash(mg thread:*)",
               "Bash(mg sync:*)", "Bash(mg stats:*)", "Bash(mg queue:*)", "Bash(mg log:*)",
               "Bash(mg draft:*)", "Bash(mg reply:*)"],
-    "deny": ["Bash(mg approve:*)", "Bash(mg daemon:*)", "Bash(mg ui:*)", "Bash(curl:*)"]
+    "deny": ["Bash(mg approve:*)", "Bash(mg daemon:*)", "Bash(mg ui:*)", "Bash(mg plugins enable:*)",
+             "Bash(mg export:*)", "Bash(mg import:*)", "Bash(mg unsub run:*)", "Bash(curl:*)"]
   }
 }
 ```

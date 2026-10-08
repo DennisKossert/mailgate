@@ -89,8 +89,25 @@ def cmd_search(a) -> None:
     print_rows(_store().search(" ".join(a.query), limit=a.n, **_filters(a)), a.json)
 
 
+def _plugins(cfg=None):
+    """Load enabled plugins (only for commands that use them, so `mg ls` stays fast)."""
+    from . import plugin
+    try:
+        cfg = cfg or load()
+    except ConfigError:
+        return None
+    return plugin.load(cfg, db_path()) if cfg.plugins else None
+
+
+def _render_lines(m) -> list[str]:
+    """Compact plugin lines for `mg read` (e.g. Trust: dmarc=pass ...)."""
+    reg = _plugins()
+    return reg.render(m)["lines"] if reg is not None and reg.has("render") else []
+
+
 def cmd_read(a) -> None:
-    m = _msg(_store(), a.id)
+    store = _store()
+    m = _msg(store, a.id)
     atts = json.loads(m["atts"] or "[]")
     from .clean import human_size
     body = m["full"] if a.full else cap(m["body"] or "", a.max)
@@ -101,6 +118,8 @@ def cmd_read(a) -> None:
             d["cc"] = m["cc"]
         if atts:
             d["at"] = [[n, s] for n, s in atts]
+        if lines := _render_lines(m):
+            d["pl"] = lines
         return out(json.dumps(d, ensure_ascii=False, separators=(",", ":")))
     name = m["from_name"] if m["from_name"] != m["from_addr"] else ""
     out(f"From: {name} <{m['from_addr']}>".replace(":  <", ": <"))
@@ -113,6 +132,8 @@ def cmd_read(a) -> None:
     out(f"Subject: {m['subject']}")
     if atts:
         out("Att: " + ", ".join(f"{n} ({human_size(s)})" for n, s in atts))
+    for ln in _render_lines(m):
+        out(ln)
     out()
     out(body)
 
@@ -177,6 +198,8 @@ def cmd_sync(a) -> None:
     total = 0
     for n in names:
         total += imapsync.sync_account(store, cfg.account(n), a.folders, cfg.max_raw_bytes, cfg.initial_days, log=out)
+    from .syncer import process_new
+    process_new(cfg, store, _plugins(cfg), unattended=False)  # events + local plugin hooks, no server changes
     out(f"new: {total}")
 
 
@@ -265,7 +288,7 @@ def cmd_log(a) -> None:
 
 def cmd_daemon(a) -> None:
     from . import daemon
-    daemon.run(load(), db_path(), web=a.web, use_ntfy=not a.no_ntfy)
+    daemon.run(load(), db_path(), web=a.web, use_ntfy=not a.no_ntfy, sync=a.sync)
 
 
 # ---- explicit server-side changes (never used by sync) ------------------------------
@@ -292,15 +315,19 @@ def cmd_rules(a) -> None:
     store = _store()
     if not cfg.sort_rules:
         return out("no [[rules]] in config")
+    reg = _plugins(cfg)
+    for p in sortrules.problems(cfg, reg):
+        out(f"warn {p}")
     if a.action == "test":
         a.n = a.n or 50
-        hits = sortrules.plan(cfg, sortrules.recent(store, a.n))
+        hits = sortrules.plan(cfg, sortrules.recent(store, a.n), reg)
         for r, rule, acts in hits:
             out(f"{b36(r['id'])} {r['acct']}/{r['folder']} {short(r['from_name'], 20)} | {short(r['subject'], 50)}"
                 f" -> {rule.name}: {', '.join(acts)}")
         out(f"{len(hits)} of the last {a.n} mails match (dry run, nothing changed)")
         return
-    lines = sortrules.apply(cfg, store, sortrules.recent(store, a.n)) if a.n else sortrules.apply_new(cfg, store)
+    lines = (sortrules.apply(cfg, store, sortrules.recent(store, a.n), out, reg) if a.n
+             else sortrules.apply_new(cfg, store, out, reg))
     for ln in lines:
         out(ln)
     out(f"applied to {len(lines)} mails")
@@ -328,14 +355,144 @@ def cmd_ui(a) -> None:
     webui.run(cfg, db_path(), a.host, a.port or cfg.ui.port, open_browser=a.open)
 
 
+# ---- plugins, events, migration ----------------------------------------------------
+
+def cmd_plugins(a) -> None:
+    from . import plugin
+    from .config import DEFAULT_PLUGINS
+    cfg = load()
+    if a.action == "list":
+        reg = plugin.load(cfg, db_path(), quiet=True)
+        for name, source in plugin.available():
+            st = reg.loaded.get(name)
+            state = ("ERROR " + st.error) if st and st.error else "enabled" if st else "-"
+            out(f"{name:14} {state:8} {source}" + (f"  {st.description}" if st and st.description else ""))
+        out(f"(default when [plugins] enabled is not set: {', '.join(DEFAULT_PLUGINS)})")
+        return
+    if not a.name:
+        raise ValueError("plugin name missing")
+    if a.action == "info":
+        kind, where = plugin.locate(a.name)
+        if kind == "bundled":
+            import importlib
+            doc = importlib.import_module(where).__doc__ or ""
+        else:
+            f = plugin.code_file(kind, where)
+            out(f"code: {f}\nsha256: {plugin._sha256(f)}\npinned: {plugin.read_pins().get(a.name, 'no')}")
+            doc = "(not imported: review the file before enabling it)"
+        out(doc.strip())
+        return
+    names = list(cfg.plugins)
+    if a.action == "enable":
+        kind, where = plugin.locate(a.name)
+        if kind != "bundled":
+            f = plugin.code_file(kind, where)
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise SystemExit("enabling a non-bundled plugin needs an interactive terminal (a human). Refusing.")
+            out(f"{a.name} is not bundled with mailgate: {f}")
+            out("Plugins run with your user rights and can read all your mail. Only enable code you trust.")
+            if input(f"Enable {a.name} and pin its SHA-256? [y/N] ").strip().lower() not in ("y", "yes", "j", "ja"):
+                raise SystemExit("aborted")
+            out(f"pinned sha256 {plugin.pin(a.name)}")
+        if a.name not in names:
+            names.append(a.name)
+    else:
+        names = [n for n in names if n != a.name]
+    _set_plugins(names)
+    out(f"enabled plugins: {', '.join(names) or '(none)'}")
+
+
+def _set_plugins(names: list[str]) -> None:
+    """Rewrite `enabled = [...]` in [plugins] (or add the section)."""
+    import tomllib
+    from .config import parse
+    p = config_path()
+    text = p.read_text()
+    line = "enabled = " + json.dumps(names)
+    sec = re.search(r"^\[plugins\]\s*$", text, re.M)
+    if sec:
+        end = re.search(r"^\[", text[sec.end():], re.M)
+        stop = sec.end() + (end.start() if end else len(text) - sec.end())
+        body = text[sec.end():stop]
+        body = re.sub(r"^enabled\s*=.*$", line, body, flags=re.M) if re.search(r"^enabled\s*=", body, re.M) \
+            else "\n" + line + body
+        text = text[:sec.end()] + body + text[stop:]
+    else:
+        text = text.rstrip("\n") + f"\n\n[plugins]\n{line}\n"
+    parse(tomllib.loads(text))
+    p.write_text(text)
+
+
+def cmd_events(a) -> None:
+    """Local event stream as JSON lines (new_mail, sync, draft, plugin.*) for scripts and integrations."""
+    store = _store()
+    after = a.since if a.since is not None else (
+        store.one("SELECT COALESCE(MAX(id),0) FROM events")[0] if a.follow else 0)
+    while True:
+        for e in store.events_after(after):
+            after = e["id"]
+            out(json.dumps({"id": e["id"], "ts": e["ts"], "type": e["type"], **json.loads(e["data"])},
+                           ensure_ascii=False))
+        sys.stdout.flush()
+        if not a.follow:
+            return
+        time.sleep(1)
+
+
+def cmd_export(a) -> None:
+    from . import migrate
+    cfg = load()
+    store = _store()
+    if a.pair:
+        if not migrate.have_crypto():
+            raise SystemExit("pairing encrypts the bundle and needs the cryptography package "
+                             "(pip install 'mailgate[crypto]')")
+        p = migrate.Pairing(migrate.bundle(cfg, store, with_secrets=True), port=a.port)
+        out(migrate.qr_terminal(p.url))
+        out(f"On the other device run:  mg import {p.code}@{p.host}:{p.port}")
+        out(f"or scan: {p.url}")
+        out(f"Includes passwords (encrypted). Valid for {migrate.PAIR_TTL // 60} minutes, one use, "
+            f"locked after {migrate.PAIR_MAX_FAILS} wrong codes. Ctrl-C stops it.")
+        state = p.serve()
+        out({"done": "transferred.", "locked": "locked: too many wrong codes, nothing was sent.",
+             "expired": "expired, nothing was sent."}.get(state, state))
+        return
+    if a.with_secrets and not migrate.have_crypto():
+        raise SystemExit("--with-secrets needs the cryptography package (pip install 'mailgate[crypto]'); "
+                         "refusing to write passwords unencrypted. Export without --with-secrets instead.")
+    path = Path(a.o)
+    code = migrate.export_file(cfg, store, path, a.with_secrets)
+    out(f"wrote {path} (mode 600). Not included: mail cache (resync), UI passphrase"
+        + ("" if a.with_secrets else ", passwords"))
+    if code:
+        out(f"Encrypted. One-time code (keep it apart from the file): {code}")
+    else:
+        out("Not encrypted: it contains your config incl. ntfy topic names. Keep it private.")
+
+
+def cmd_import(a) -> None:
+    from . import migrate
+    if re.match(r"^(mgpair://|[0-9A-Za-z-]+@)", a.source):
+        data = migrate.fetch_pair(a.source)
+    else:
+        code = a.code
+        if code is None and "enc" in json.loads(Path(a.source).read_text()):
+            import getpass
+            code = getpass.getpass("One-time code: ")
+        data = migrate.read_file(Path(a.source), code)
+    migrate.import_bundle(data, _store(), force=a.force, log=out)
+
+
 # ---- setup ----------------------------------------------------------------------
 
 def cmd_init(a) -> None:
     p = config_path()
     if p.exists() and not a.force:
         raise SystemExit(f"{p} exists (use --force to overwrite)")
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):  # also when the file existed
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(example())
     out(f"wrote {p}, edit it, then run: mg doctor")
@@ -359,8 +516,9 @@ def cmd_doctor(a) -> None:
         cfg = load()
         return f"{config_path()} ({len(cfg.accounts)} accounts)"
     check("config", _cfg)
-    if config_path().exists() and config_path().stat().st_mode & 0o077:
-        out(f"warn config is readable by other users, run: chmod 600 {config_path()}")
+    from .config import insecure_paths
+    for w in insecure_paths():
+        out(f"warn {w}")
     check("database", lambda: f"{db_path()} (fts5 {'on' if _store().fts else 'off'})")
     if not cfg:
         raise SystemExit(1)
@@ -405,6 +563,21 @@ def cmd_doctor(a) -> None:
         out("info ntfy not configured (approve via `mg daemon --web` or `mg approve`)")
     if not ok:
         raise SystemExit(1)
+
+
+def _add_plugin_commands(p: argparse.ArgumentParser, reg, core: set) -> None:
+    sub = p._subparsers._group_actions[0]  # noqa: SLF001
+    for name, c in reg.commands.items():
+        if name in core:
+            continue  # plugins cannot replace core commands
+        sp = sub.add_parser(name, help=f"{c.help} [plugin {c.plugin}]", description=c.help)
+        if c.args:
+            c.args(sp)
+        def run(a, c=c):
+            res = reg.call(reg.apis[c.plugin], c.fn, a, default=False)
+            if res is False:
+                raise SystemExit(1)
+        sp.set_defaults(fn=run)
 
 
 # ---- parser ---------------------------------------------------------------------
@@ -480,6 +653,8 @@ def parser() -> argparse.ArgumentParser:
     sp = cmd("daemon", cmd_daemon, "approval listener (ntfy) and optional local web UI")
     sp.add_argument("--web", metavar="HOST:PORT", help="serve approval page, e.g. 127.0.0.1:8765")
     sp.add_argument("--no-ntfy", action="store_true")
+    sp.add_argument("--sync", action="store_true",
+                    help="also sync in the background (IDLE + [sync] minutes), apply [[rules]], send reminders")
     sp = cmd("ui", cmd_ui, "local web mail client for humans (sends without approval, passphrase protected)")
     sp.add_argument("--host", default="127.0.0.1", help="loopback address (default 127.0.0.1)")
     sp.add_argument("--port", type=int, help="default 8766 or [ui] port")
@@ -499,6 +674,21 @@ def parser() -> argparse.ArgumentParser:
     sp = cmd("rules", cmd_rules, "sorting rules: test (dry run) or apply")
     sp.add_argument("action", choices=("test", "apply"))
     sp.add_argument("-n", type=int, default=0, help="last N mails (test default 50; apply default: new mail only)")
+    sp = cmd("plugins", cmd_plugins, "list, inspect, enable or disable plugins")
+    sp.add_argument("action", choices=("list", "info", "enable", "disable"))
+    sp.add_argument("name", nargs="?")
+    sp = cmd("events", cmd_events, "local event stream as JSON lines (new_mail, sync, draft, plugin.*)")
+    sp.add_argument("--follow", "-f", action="store_true", help="keep running and print new events")
+    sp.add_argument("--since", type=int, help="print events after this id")
+    sp = cmd("export", cmd_export, "bundle config, rules, watchers and drafts for another device")
+    sp.add_argument("-o", default="mailgate.mgx", help="output file (default mailgate.mgx)")
+    sp.add_argument("--with-secrets", action="store_true", help="include passwords, encrypted (needs cryptography)")
+    sp.add_argument("--pair", action="store_true", help="serve it once over the LAN with a one-time code and QR")
+    sp.add_argument("--port", type=int, default=8767)
+    sp = cmd("import", cmd_import, "import an export file or pair: mg import CODE@HOST or mgpair://...")
+    sp.add_argument("source")
+    sp.add_argument("--code", help="one-time code of an encrypted file")
+    sp.add_argument("--force", action="store_true", help="replace an existing config (a backup is kept)")
     sp = cmd("init", cmd_init, "write an example config")
     sp.add_argument("--force", action="store_true")
     cmd("doctor", cmd_doctor, "check config, approval mode and connectivity (never prints secrets)",
@@ -508,12 +698,21 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `mg` console script."""
-    a = parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    p = parser()
+    core = set(p._subparsers._group_actions[0].choices)  # noqa: SLF001
+    first = next((x for x in argv if not x.startswith("-")), None)
+    reg = None
+    if (first and first not in core) or any(x in ("-h", "--help") for x in argv[:1]):
+        reg = _plugins()  # only now: plugin commands such as `mg remind`
+        if reg is not None:
+            _add_plugin_commands(p, reg, core)
+    a = p.parse_args(argv)
     try:
         a.fn(a)
     except BrokenPipeError:
         return 0
-    except (ConfigError, ValueError, approve.ApprovalError, imapsync.SyncError, OSError,
+    except (ConfigError, ValueError, LookupError, approve.ApprovalError, imapsync.SyncError, OSError,
             imaplib.IMAP4.error, smtplib.SMTPException) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

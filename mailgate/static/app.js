@@ -26,7 +26,12 @@ const T = {
       ["f", "forward"], ["c", "write new"], ["/", "search"], ["e", "archive"], ["#", "move to Trash"],
       ["u", "toggle read / unread"], ["s", "toggle flag"], ["v", "move to folder"], ["t", "text / original"],
       ["Esc", "back / close"], ["?", "this help"]],
-    error: "Error", sending: "Sending…", agoNow: "just now",
+    error: "Error", sending: "Sending…", agoNow: "just now", pair: "Transfer to another device",
+    pairHint: "On the other device run the command below, or scan the code. It includes your passwords (encrypted), works once and expires in 10 minutes.",
+    pairNoCrypto: "Transfer needs the optional cryptography package: pip install 'mailgate[crypto]'.",
+    pairConfirm: "Start a one-time transfer over your local network for 10 minutes?",
+    duplicates: n => `${n} copies`, selectAll: "Select all", plugins: "Plugins",
+    auth_pass: "verified", auth_fail: "authentication failed", auth_none: "unverified",
   },
   de: {
     loginIntro: "Gib die UI-Passphrase ein, die du mit mg ui festgelegt hast.", passphrase: "Passphrase",
@@ -55,7 +60,12 @@ const T = {
       ["a", "allen antworten"], ["f", "weiterleiten"], ["c", "neue Nachricht"], ["/", "suchen"], ["e", "archivieren"],
       ["#", "in den Papierkorb"], ["u", "gelesen / ungelesen"], ["s", "Markierung an / aus"],
       ["v", "in Ordner verschieben"], ["t", "Text / Original"], ["Esc", "zurück / schließen"], ["?", "diese Hilfe"]],
-    error: "Fehler", sending: "Wird gesendet…", agoNow: "gerade eben",
+    error: "Fehler", sending: "Wird gesendet…", agoNow: "gerade eben", pair: "Auf anderes Gerät übertragen",
+    pairHint: "Auf dem anderen Gerät den Befehl unten ausführen oder den Code scannen. Enthält deine Passwörter (verschlüsselt), funktioniert einmal und läuft nach 10 Minuten ab.",
+    pairNoCrypto: "Für die Übertragung wird das optionale Paket cryptography gebraucht: pip install 'mailgate[crypto]'.",
+    pairConfirm: "Einmalige Übertragung im lokalen Netz für 10 Minuten starten?",
+    duplicates: n => `${n} Kopien`, selectAll: "Alle auswählen", plugins: "Plugins",
+    auth_pass: "geprüft", auth_fail: "Prüfung fehlgeschlagen", auth_none: "ungeprüft",
   },
 };
 
@@ -83,6 +93,12 @@ const ICONS = {
   thread: '<path d="M20 14.5a2 2 0 0 1-2 2H8l-4 3.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/>',
   logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h10"/>',
   keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/>',
+  unsub: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5"/><path d="M15 15l5 5M20 15l-5 5"/>',
+  news: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  snooze: '<path d="M9 4h6l-6 7h6"/><path d="M5 20a8 8 0 0 0 14-6"/>',
+  plug: '<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
+  devices: '<rect x="2.5" y="5" width="13" height="10" rx="1.5"/><path d="M6 19h6"/><rect x="17.5" y="8" width="4" height="11" rx="1"/>',
   dl: '<path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 19.5h14"/>',
 };
 
@@ -204,6 +220,9 @@ $("loginForm").addEventListener("submit", async ev => {
 });
 
 /* ---- navigation pane ---- */
+/* plugin labels are "text" or {"en": ..., "de": ...} */
+function L(x) { return typeof x === "string" ? x : (x && (x[S.lang] || x.en || Object.values(x)[0])) || ""; }
+
 function navItem(label, ic, view, count, hot) {
   const cur = JSON.stringify(view) === JSON.stringify(S.view);
   return h("li", {}, h("button", { type: "button", class: "f", "aria-current": cur ? "true" : "false",
@@ -215,7 +234,9 @@ function renderNav() {
   const st = S.st, nav = $("nav");
   const inboxUnread = st.accounts.reduce((n, a) => n + (a.folders.find(f => f.name === "INBOX") || { u: 0 }).u, 0);
   const top = h("ul", {}, navItem(t("unified"), "inbox", { kind: "unified" }, inboxUnread, true),
-    navItem(t("approvals"), "shield", { kind: "drafts" }, st.drafts, st.drafts > 0));
+    navItem(t("approvals"), "shield", { kind: "drafts" }, st.drafts, st.drafts > 0),
+    st.plugins.views.map(v => navItem(L(v.label), v.icon || "plug", { kind: "plugin", plugin: v.plugin, id: v.id },
+      v.badge, v.badge > 0)));
   const accts = st.accounts.map(a => [h("h3", { title: a.email, text: a.display ? `${a.name} · ${a.email}` : a.email }),
     h("ul", {}, a.folders.map(f => navItem(f.name === "INBOX" ? "Inbox" : f.name, f.name === "INBOX" ? "inbox" : "folder",
       { kind: "folder", acct: a.name, folder: f.name }, f.u, true)))]);
@@ -223,6 +244,7 @@ function renderNav() {
     "Notification" in window ? h("button", { type: "button", onclick: enableNotify },
       icon("bell"), " ", S.notify ? t("notifyOn") : t("notify")) : null,
     h("button", { type: "button", onclick: () => $("helpDlg").showModal() }, icon("keyboard"), " ", t("shortcuts")),
+    st.auth && st.pairing ? h("button", { type: "button", onclick: startPair }, icon("devices"), " ", t("pair")) : null,
     st.auth ? h("button", { type: "button", onclick: logout }, icon("logout"), " ", t("logout")) : null,
     h("span", { text: `mailgate ${st.version}` }));
   nav.replaceChildren(top, ...accts.flat(), foot);
@@ -259,6 +281,7 @@ function viewTitle() {
   const v = S.view;
   if (v.kind === "unified") return t("unified");
   if (v.kind === "drafts") return t("approvals");
+  if (v.kind === "plugin") return L((pluginView(v) || {}).label);
   if (v.kind === "search") return t("results", v.q);
   return `${v.folder === "INBOX" ? "Inbox" : v.folder} · ${v.acct}`;
 }
@@ -275,21 +298,24 @@ function listQuery(before) {
 
 async function loadList(reset) {
   $("listTitle").textContent = viewTitle();
-  $("unreadOnly").parentElement.hidden = S.view.kind === "drafts";
+  $("unreadOnly").parentElement.hidden = S.view.kind === "drafts" || S.view.kind === "plugin";
   if (S.view.kind === "drafts") return loadDrafts();
+  if (S.view.kind === "plugin") return loadPluginView();
   if (S.loading || (!reset && !S.next)) return;
   S.loading = true;
   if (reset) { S.items = []; S.next = ""; $("list").replaceChildren(h("li", { class: "listmsg", text: t("loading") })); }
   try {
     const r = await api(listQuery(reset ? "" : S.next));
-    S.items = reset ? r.items : S.items.concat(r.items);
+    const have = new Set(reset ? [] : S.items.map(m => m.mi).filter(Boolean));  // dedupe across pages
+    S.items = (reset ? [] : S.items).concat(r.items.filter(m => !m.mi || !have.has(m.mi)));
     S.next = r.next;
     renderList();
   } catch (e) { fail(e); } finally { S.loading = false; }
 }
 
 function rowFor(m) {
-  const meta = h("span", { class: "meta" }, m.fl ? h("span", { class: "flag" }, icon("flag")) : null,
+  const meta = h("span", { class: "meta" }, m.dup ? h("span", { class: "dup", title: t("duplicates", m.dup), text: `×${m.dup}` }) : null,
+    m.fl ? h("span", { class: "flag" }, icon("flag")) : null,
     m.at ? icon("clip") : null, fmtDate(m.d));
   return h("li", {}, h("button", {
     type: "button", class: "row" + (m.u ? " unread" : ""), id: "m-" + m.id, "aria-selected": S.sel === m.id ? "true" : "false",
@@ -317,6 +343,7 @@ new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadList(fa
 
 async function mergeTop() {
   if (S.view.kind === "drafts") return loadDrafts();
+  if (S.view.kind === "plugin") return loadPluginView();
   try {
     const r = await api(listQuery(""));
     const have = new Map(S.items.map(m => [m.id, m]));
@@ -372,7 +399,8 @@ function renderReader() {
     m.html || m.text !== m.full ? iconBtn("text", (S.textMode ? t("original") : t("text")) + " (t)", toggleText,
       { class: "icon" + (S.textMode ? " on" : ""), "aria-pressed": S.textMode ? "true" : "false" }) : null,
     m.thread > 1 ? h("button", { type: "button", class: "icon" + (S.threadMode ? " on" : ""), title: t("thread"),
-      "aria-pressed": S.threadMode ? "true" : "false", onclick: toggleThread }, icon("thread"), ` ${m.thread}`) : null);
+      "aria-pressed": S.threadMode ? "true" : "false", onclick: toggleThread }, icon("thread"), ` ${m.thread}`) : null,
+    pluginButtons(m));
   const hdr = h("div", { class: "hdr" },
     h("span", { class: "k", text: t("from") }), h("span", { class: "v", text: m.from && m.from !== m.addr ? `${m.from} <${m.addr}>` : m.addr }),
     h("span", { class: "date", text: fmtDate(m.d, true) }),
@@ -381,23 +409,29 @@ function renderReader() {
     h("a", { href: `/api/msg/${m.id}/att/${a.n}`, download: a.name }, icon("dl"), a.name, h("span", { class: "size", text: size(a.size) })))) : null;
   const note = m.html && m.remote && !S.images.has(m.id) && !S.textMode && !S.threadMode ? h("div", { class: "note" },
     t("imagesBlocked", m.remote), h("button", { type: "button", onclick: () => { S.images.add(m.id); renderReader(); } }, t("loadImages"))) : null;
-  const head = h("div", { class: "rhead" }, tools, h("h1", { text: m.s || "—" }), hdr, atts, note);
+  const rd = m.render || { badges: [], banners: [] };
+  const badges = rd.badges.length ? h("span", { class: "badges" }, rd.badges.map(b =>
+    h("span", { class: `badge ${b.tone || "neutral"}`, title: b.title || "", text: b.key && t(b.key) !== b.key ? t(b.key) : b.text }))) : null;
+  const banners = rd.banners.map(b => h("div", { class: `note ${b.tone || "warn"}`, role: "note" }, "⚠ ", b.text));
+  const head = h("div", { class: "rhead" }, tools, h("h1", {}, m.s || "—", badges), hdr, atts, banners, note);
   let body;
   if (S.threadMode) body = h("div", { class: "thread", id: "threadBox", text: t("loading") });
   else if (m.html && !S.textMode) {
     body = h("iframe", { class: "mailframe", title: m.s || "mail", sandbox: "allow-popups allow-popups-to-escape-sandbox",
       referrerpolicy: "no-referrer", src: `/api/msg/${m.id}/html${S.images.has(m.id) ? "?images=1" : ""}` });
-  } else body = plain(S.textMode ? m.text : (m.full || m.text));
+  } else body = plain(S.textMode ? m.text : (m.full || m.text), m.links);
   $("reader").replaceChildren(head, body);
   if (S.threadMode) loadThread();
 }
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/g;
-function plain(text) {
+function plain(text, links) {
   const div = h("div", { class: "plain" });
   let last = 0;
   for (const mt of (text || "").matchAll(URL_RE)) {
-    div.append(text.slice(last, mt.index), h("a", { href: mt[0], target: "_blank", rel: "noopener noreferrer", text: mt[0] }));
+    const l = (links || {})[mt[0]] || { href: mt[0], warn: [] };  // cleaned by plugins (tracking params)
+    div.append(text.slice(last, mt.index), h("a", { href: l.href, title: l.href, target: "_blank", rel: "noopener noreferrer", text: l.href }));
+    for (const w of l.warn || []) div.append(h("span", { class: "linkwarn", text: `⚠ ${w}` }));
     last = mt.index + mt[0].length;
   }
   div.append((text || "").slice(last));
@@ -616,6 +650,11 @@ function listen() {
       mergeTop();
       if (d.new > 0) notifyNew(d.new);
     }
+    if (d.t === "notify") {
+      status(d.text);
+      refreshState();
+      if (S.notify && document.hidden) new Notification("mailgate", { body: d.text, icon: "/static/icon.svg" });
+    }
     if (d.t === "drafts") {
       await refreshState();
       if (S.view.kind === "drafts") loadDrafts();
@@ -640,6 +679,91 @@ function notifyNew(n) {
 async function logout() {
   try { await api("/api/logout", {}); } catch (e) { /* ignore */ }
   location.reload();
+}
+
+/* ---- plugins: message actions, sidebar views, device transfer ---- */
+function pluginView(v) { return S.st.plugins.views.find(x => x.plugin === v.plugin && x.id === v.id); }
+
+function choiceMenu(anchor, choices, onpick) {
+  const old = document.querySelector(".menu");
+  if (old) old.remove();
+  const menu = h("div", { class: "menu", role: "menu" }, choices.map(([value, label]) =>
+    h("button", { type: "button", role: "menuitem", onclick: () => { menu.remove(); onpick(value); } }, L(label))));
+  anchor.after(menu);
+  const first = menu.querySelector("button");
+  if (first) first.focus();
+  menu.addEventListener("keydown", ev => { if (ev.key === "Escape") { ev.stopPropagation(); menu.remove(); anchor.focus(); } });
+}
+
+document.addEventListener("click", ev => {
+  const menu = document.querySelector(".menu");
+  if (menu && !menu.contains(ev.target) && !(ev.target.closest && ev.target.closest(".menuwrap"))) menu.remove();
+});
+
+function pluginButtons(m) {
+  const acts = S.st.plugins.actions.filter(a => (m.actions || []).includes(`${a.plugin}/${a.id}`));
+  if (!acts.length) return null;
+  return [h("span", { class: "sep" }), ...acts.map(a => {
+    const run = async choice => {
+      if (a.confirm && !confirm(L(a.confirm))) return;
+      try { const r = await api(`/api/plugin/${a.plugin}/action/${a.id}`, { id: m.id, choice }); status(r.ok); refreshState(); } catch (e) { fail(e); }
+    };
+    const btn = h("button", { type: "button", class: "icon", title: L(a.label), "aria-label": L(a.label), disabled: S.st.readonly,
+      "aria-haspopup": a.choices ? "menu" : null, onclick: ev => a.choices ? choiceMenu(ev.currentTarget, a.choices, run) : run(null) },
+    icon(a.icon || "plug"));
+    return h("span", { class: "menuwrap" }, btn);
+  })];
+}
+
+async function loadPluginView() {
+  const v = S.view, def = pluginView(v);
+  if (!def) return;
+  try {
+    const r = await api(`/api/plugin/${v.plugin}/view/${v.id}`);
+    S.pv = r;
+    const ul = $("list");
+    const picked = new Set();
+    const bar = h("li", { class: "pvbar" },
+      r.multi ? h("label", { class: "toggle" }, h("input", { type: "checkbox", onchange: ev => {
+        ul.querySelectorAll("input[data-key]").forEach(c => { c.checked = ev.target.checked; c.dispatchEvent(new Event("change")); });
+      } }), " ", t("selectAll")) : null,
+      def.actions.map(a => h("button", { type: "button", disabled: S.st.readonly, onclick: ev => {
+        const keys = [...picked];
+        if (!keys.length) return;
+        const go = async choice => {
+          if (a.confirm && !confirm(L(a.confirm))) return;
+          try { const res = await api(`/api/plugin/${v.plugin}/view/${v.id}/${a.id}`, { keys, choice }); status(res.ok); loadPluginView(); refreshState(); } catch (e) { fail(e); }
+        };
+        a.choices ? choiceMenu(ev.currentTarget, a.choices, go) : go(null);
+      } }, L(a.label))));
+    ul.replaceChildren(bar, ...r.items.map(it => h("li", { class: "pvrow" + (it.hot ? " hot" : "") },
+      r.multi ? h("input", { type: "checkbox", "data-key": it.key, "aria-label": it.title,
+        onchange: ev => ev.target.checked ? picked.add(it.key) : picked.delete(it.key) }) : null,
+      h("button", { type: "button", class: "row", onclick: () => it.msg && select(it.msg, true) },
+        h("span", { class: "dot" }), h("span", { class: "who", text: it.title }), h("span", { class: "meta", text: "" }),
+        h("span", { class: "subj", text: it.sub || "" }), h("span", { class: "pv", text: it.meta || "" })))));
+    if (!r.items.length) ul.append(h("li", { class: "listmsg", text: L(r.empty) || t("noMail") }));
+  } catch (e) { fail(e); }
+}
+
+async function startPair() {
+  if (!confirm(t("pairConfirm"))) return;
+  const dlg = $("pairDlg");
+  $("pairBody").replaceChildren(h("p", { text: t("loading") }));
+  dlg.showModal();
+  try {
+    const r = await api("/api/pair", {});
+    const n = r.qr.length, pad = 3, svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${n + 2 * pad} ${n + 2 * pad}`);
+    svg.setAttribute("class", "qr");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", r.url);
+    let d = "";
+    r.qr.forEach((row, y) => row.forEach((on, x) => { if (on) d += `M${x + pad} ${y + pad}h1v1h-1z`; }));
+    svg.innerHTML = `<rect width="100%" height="100%" fill="#fff"/><path fill="#000" d="${d}"/>`;
+    $("pairBody").replaceChildren(h("p", { text: t("pairHint") }), svg,
+      h("pre", { class: "paircmd", text: `mg import ${r.code}@${r.host}:${r.port}` }), h("p", { class: "hint", text: r.url }));
+  } catch (e) { $("pairBody").replaceChildren(h("p", { class: "error", text: e.message })); }
 }
 
 /* ---- keyboard ---- */

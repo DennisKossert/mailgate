@@ -27,7 +27,14 @@ CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY, acct TEXT, created INT
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, ts INTEGER, draft INTEGER, action TEXT,
   via TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS seen_ids(watcher TEXT, msgid TEXT, PRIMARY KEY(watcher, msgid));
+CREATE TABLE IF NOT EXISTS plugin_meta(msgid TEXT, plugin TEXT, data TEXT, PRIMARY KEY(msgid, plugin));
+CREATE TABLE IF NOT EXISTS plugin_data(plugin TEXT, kind TEXT, key TEXT, data TEXT, ts INTEGER,
+  PRIMARY KEY(plugin, kind, key));
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts INTEGER, type TEXT, data TEXT);
 """
+MIGRATIONS = {"drafts": {"send_at": "INTEGER"},  # 0.1.0
+              "watchers": {"since": "INTEGER"}}  # 0.4.0 (mg import)
 FIELDS = ("acct", "folder", "uid", "uidvalidity", "msgid", "irt", "refs", "thread", "reply_to", "date",
           "from_name", "from_addr", "to_addr", "cc", "subject", "unread", "flags", "atts", "body",
           "full", "raw", "size")
@@ -82,13 +89,19 @@ class Store:
 
     def __init__(self, path: Path | str):
         if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not Path(path).exists():  # mail cache: readable by you only
+                import os
+                os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
         self.db = sqlite3.connect(str(path), timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
-        if "send_at" not in {r[1] for r in self.q("PRAGMA table_info(drafts)")}:  # 0.1.0 databases
-            self.db.execute("ALTER TABLE drafts ADD COLUMN send_at INTEGER")
+        for table, cols in MIGRATIONS.items():
+            have = {r[1] for r in self.q(f"PRAGMA table_info({table})")}
+            for col, typ in cols.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         try:
             self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(fr, subject, body)")
             self.fts = True
@@ -215,10 +228,13 @@ class Store:
         """Unseen messages for a watcher; marks them seen. A new watcher starts at 'now' unless backlog."""
         fresh = not self.one("SELECT 1 FROM watchers WHERE name=?", (name,))
         w, a = self._filters(acct=acct, folder=folder)
+        since = (self.one("SELECT since FROM watchers WHERE name=?", (name,)) or [None])[0] or 0
         rows = self.q(f"SELECT {LIST_COLS}, body FROM msgs m WHERE {w} AND NOT EXISTS "
-                      "(SELECT 1 FROM seen s WHERE s.watcher=? AND s.msg=m.id) ORDER BY m.date, m.id", a + [name])
+                      "(SELECT 1 FROM seen s WHERE s.watcher=? AND s.msg=m.id) AND NOT EXISTS "
+                      "(SELECT 1 FROM seen_ids x WHERE x.watcher=? AND x.msgid=m.msgid AND m.msgid!='') "
+                      "AND (m.msgid!='' OR m.date>=?) ORDER BY m.date, m.id", a + [name, name, since])
         self.db.execute("BEGIN")
-        self.db.execute("INSERT OR IGNORE INTO watchers VALUES(?,?)", (name, int(time.time())))
+        self.db.execute("INSERT OR IGNORE INTO watchers(name, created) VALUES(?,?)", (name, int(time.time())))
         self.db.executemany("INSERT OR IGNORE INTO seen VALUES(?,?)", [(name, r["id"]) for r in rows])
         self.db.execute("COMMIT")
         return [] if fresh and not backlog else rows
@@ -266,6 +282,7 @@ class Store:
     def audit(self, draft: int, action: str, via: str, detail: str = "") -> None:
         self.db.execute("INSERT INTO audit(ts, draft, action, via, detail) VALUES(?,?,?,?,?)",
                         (int(time.time()), draft, action, via, detail))
+        self.emit("draft", {"draft": "d" + b36(draft), "action": action, "via": via})
 
     def log(self, limit: int = 20) -> list[sqlite3.Row]:
         return self.q("SELECT a.*, d.to_addr, d.subject FROM audit a LEFT JOIN drafts d ON d.id=a.draft "
@@ -278,3 +295,14 @@ class Store:
 
     def kv_set(self, k: str, v: str) -> None:
         self.db.execute("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, v))
+
+    # local event stream (mg events, integrations)
+    def emit(self, type_: str, data: dict) -> None:
+        now = int(time.time())
+        self.db.execute("INSERT INTO events(ts, type, data) VALUES(?,?,?)",
+                        (now, type_, json.dumps(data, ensure_ascii=False)))
+        if now % 50 == 0:
+            self.db.execute("DELETE FROM events WHERE ts<?", (now - 7 * 86400,))
+
+    def events_after(self, after: int, limit: int = 500) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit))

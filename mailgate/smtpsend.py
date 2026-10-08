@@ -5,10 +5,12 @@ import smtplib
 import ssl
 
 from .config import Account
+from .plugin import assert_not_plugin
 
 
 def connect(acct: Account) -> smtplib.SMTP:
     """Open an authenticated SMTP connection (465 SSL or 587 STARTTLS)."""
+    assert_not_plugin("open an SMTP connection")
     s = acct.smtp
     if s.security == "ssl":
         conn: smtplib.SMTP = smtplib.SMTP_SSL(s.host, s.port, context=ssl.create_default_context(), timeout=60)
@@ -23,6 +25,7 @@ def connect(acct: Account) -> smtplib.SMTP:
 
 def send(acct: Account, mime: bytes, rcpts: list[str]) -> None:
     """Send the exact bytes; raises on any refused recipient."""
+    assert_not_plugin("send mail over SMTP")
     conn = connect(acct)
     try:
         refused = conn.sendmail(acct.email, rcpts, mime)

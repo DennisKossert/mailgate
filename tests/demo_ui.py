@@ -34,6 +34,9 @@ def html_mail(subject: str, frm: str, when: datetime, html: str, text: str, msgi
     m["From"], m["To"], m["Subject"] = frm, "Jane Doe <jane@example.com>", subject
     m["Date"], m["Message-ID"] = format_datetime(when), msgid
     m["List-Id"] = "Example News <news.example.com>"
+    m["List-Unsubscribe"] = "<https://news.example.com/unsubscribe?u=123>"
+    m["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    m["Authentication-Results"] = "mx.example.com; spf=pass; dkim=pass header.d=example.com; dmarc=pass"
     m.set_content(text)
     m.add_alternative(html, subtype="html")
     m.get_payload()[1].add_related(PNG, maintype="image", subtype="png", cid="<logo@example.com>")
@@ -74,6 +77,15 @@ def seed(imap: FakeIMAP) -> None:
     imap.add("INBOX", make_mail("Your parcel is on its way", "Your parcel will arrive tomorrow between 10 and 14.",
              frm="Example Parcel <noreply@parcel.example.com>", msgid="<pk@example.com>", date=ago(days=4)),
              "\\Seen")
+    phish = EmailMessage()
+    phish["From"], phish["To"] = "PayPal Service <service@paypal-konto.example.net>", "jane@example.com"
+    phish["Subject"], phish["Date"] = "Your account has been limited", format_datetime(ago(hours=9))
+    phish["Authentication-Results"] = "mx.example.com; spf=fail smtp.mailfrom=example.net; dkim=none; dmarc=fail"
+    phish.set_content("Please confirm your account.")
+    phish.add_alternative('<p>Dear customer,</p><p>please confirm your account within 24 hours:</p>'
+                          '<p><a href="https://login.example.net/confirm?utm_source=mail">https://www.paypal.com/'
+                          'account</a></p>', subtype="html")
+    imap.add("INBOX", phish.as_bytes())
     imap.add("Archive", make_mail("Tax documents 2025", "All documents are in the shared folder now.",
              frm="Max Mustermann <max@example.org>", msgid="<tx@example.org>", date=ago(days=40)), "\\Seen")
 
@@ -102,6 +114,9 @@ signature = "Jane"
 
 [ui]
 lang = "en"
+
+[plugins]
+enabled = ["auth", "linkclean", "dedupe", "unsubscribe", "followup"]
 ''')
     os.environ.update(MAILGATE_CONFIG=str(tmp / "config.toml"), MAILGATE_DB=str(tmp / "mail.db"),
                       MG_DEMO_PW="secret")

@@ -162,12 +162,15 @@ def web_server(cfg: Config, db: Path, bind: str) -> ThreadingHTTPServer:
 
 # ---- main -----------------------------------------------------------------
 
-def run(cfg: Config, db: Path, web: str | None = None, use_ntfy: bool = True) -> None:
-    """Run until SIGINT/SIGTERM."""
+def run(cfg: Config, db: Path, web: str | None = None, use_ntfy: bool = True, sync: bool = False) -> None:
+    """Run until SIGINT/SIGTERM. sync=True adds background sync, IMAP IDLE, sorting rules and reminders."""
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *a: stop.set())
     threads = []
     srv = None
+    from .config import insecure_paths
+    for w in insecure_paths():
+        log(f"warning: {w}")
     if web:
         srv = web_server(cfg, db, web)
         h, p = srv.server_address[:2]
@@ -176,8 +179,12 @@ def run(cfg: Config, db: Path, web: str | None = None, use_ntfy: bool = True) ->
     if use_ntfy and cfg.ntfy:
         log(f"listening on ntfy reply topic at {cfg.ntfy.server}")
         threads.append(threading.Thread(target=ntfy_loop, args=(cfg, db, stop), daemon=True))
+    if sync:
+        from .syncer import Syncer
+        log(f"syncing every {cfg.sync_minutes:g} min (+ IMAP IDLE), {len(cfg.sort_rules)} sorting rules")
+        threads += Syncer(cfg, db, cfg.sync_minutes).threads(stop)
     if not threads:
-        raise SystemExit("nothing to do: configure [approval.ntfy] or pass --web 127.0.0.1:8765")
+        raise SystemExit("nothing to do: configure [approval.ntfy], pass --sync or --web 127.0.0.1:8765")
     for t in threads:
         t.start()
     store = Store(db)
