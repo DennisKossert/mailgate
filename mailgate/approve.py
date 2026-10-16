@@ -12,6 +12,7 @@ import urllib.request
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email import policy
+from email.utils import getaddresses, parseaddr
 
 from . import imapsync, smtpsend
 from .plugin import active as plugin_active, assert_not_plugin
@@ -22,6 +23,35 @@ from .store import Store, draft_ref
 NTFY_MAX_BODY = 3500
 CMD_RE = re.compile(r"^\s*(approve|reject)\s+(d[0-9a-z]+)\s+(\S+)\s*$")
 BATCH_RE = re.compile(r"^\s*(approveall|rejectall)\s+(b[0-9a-z]+)\s+(\S+)\s*$")
+
+
+TEXT = {
+    "en": {"ask": "Send?", "auto": "sending automatically in {s}s", "manual": "Not sent automatically",
+           "nosubject": "(no subject)", "labels": None},
+    "de": {"ask": "Senden?", "auto": "wird automatisch gesendet in {s}s", "manual": "Nicht automatisch gesendet",
+           "nosubject": "(ohne Betreff)",
+           "labels": {"From": "Von", "To": "An", "Cc": "Cc", "Subject": "Betreff", "Attachments": "Anhänge"}},
+}
+DOTS = "🔵🟢🟠🟣🟡🔴"
+
+
+def account_dot(sender: str) -> str:
+    """A stable colored dot per sending address, so accounts are told apart at a glance in the push."""
+    return DOTS[int(hashlib.sha256(addr_only(sender).lower().encode()).hexdigest(), 16) % len(DOTS)]
+
+
+def addr_only(s: str) -> str:
+    return parseaddr(s)[1] or s
+
+
+def short_addr(s: str) -> str:
+    """'Name <a@b>' (or a list) -> 'Name'/'a@b', the first entry plus a count of the rest."""
+    items = getaddresses([s])
+    if not items:
+        return s
+    n, a = items[0]
+    first = n or a or s
+    return first + (f" +{len(items) - 1}" if len(items) > 1 else "")
 
 
 class ApprovalError(Exception):
@@ -185,12 +215,18 @@ def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str, note: str = "",
         if headers:
             a["headers"] = headers
         return a
+    msg = BytesParser(policy=policy.default).parsebytes(mime)
+    t = TEXT[n.lang if n.lang in TEXT else "en"]
+    who = account_dot(str(msg["From"] or "")) + " " + short_addr(str(msg["From"] or "?"))
+    to = short_addr(str(msg["To"] or "?"))
+    subj = str(msg["Subject"] or t["nosubject"])
+    head = f"{who} → {to}: {subj}"[:120]
     if stop:
-        title, actions = f"mailgate {ref}: sending automatically in {cfg.undo_seconds}s", [action(n.stop_label, "reject")]
+        title, actions = f"⏱ {t['auto'].format(s=cfg.undo_seconds)} {ref}: {head}", [action(n.stop_label, "reject")]
     else:
-        title = f"mailgate {ref}: approve sending?"
+        title = f"✉ {t['ask']} {ref}: {head}"
         actions = [action(n.approve_label, "approve"), action(n.reject_label, "reject")]
-    body = (f"Not sent automatically: {note}\n\n" if note else "") + preview(mime, NTFY_MAX_BODY)
+    body = (f"⚠ {t['manual']}: {note}\n\n" if note else "") + preview(mime, NTFY_MAX_BODY, t["labels"])
     return {"topic": n.topic, "title": title, "message": body, "priority": n.priority, "tags": ["email"],
             "actions": actions}
 
@@ -274,7 +310,8 @@ def batch_request(cfg: Config, store: Store, ids: list[int]) -> tuple[str, str |
     store.kv_set("batch:" + ref, json.dumps({"ids": [d["id"] for d in rows], "hash": sha256(token)}))
     for d in rows:
         store.audit(d["id"], "batch_requested", "cli", ref)
-    lines = [f"{draft_ref(d['id'])} an {d['to_addr'][:45]}: {d['subject'][:60]}" for d in rows]
+    lines = [f"{account_dot(d['sender'] or '')} {d['acct']} → {short_addr(d['to_addr'] or '?')[:40]}\n   {(d['subject'] or '(ohne Betreff)')[:70]}"
+             for d in rows]
     body = "\n".join(lines)
     if len(body) > NTFY_MAX_BODY:
         body = body[:NTFY_MAX_BODY - 40] + f"\n... (alle {len(rows)} in mg queue --full)"
@@ -287,7 +324,7 @@ def batch_request(cfg: Config, store: Store, ids: list[int]) -> tuple[str, str |
         if c.auth_header():
             a["headers"] = c.auth_header()
         return a
-    payload = {"topic": c.topic, "title": f"mailgate {ref}: {len(rows)} Mails freigeben?", "message": body,
+    payload = {"topic": c.topic, "title": f"✉ {len(rows)} Mails freigeben? {ref}", "message": body,
                "priority": c.priority, "tags": ["email"],
                "actions": [action(f"Alle {len(rows)} senden", "approveall"), action("Alle verwerfen", "rejectall")]}
     try:

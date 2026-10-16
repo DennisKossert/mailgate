@@ -136,6 +136,12 @@ you approved is exactly what goes out over SMTP and what is appended to the Sent
 
 There are three ways to approve. They can be combined.
 
+### Many drafts at once
+
+`mg draft --quiet` / `mg reply --quiet` queue a draft without a push. `mg batch` then sends one
+push that lists them all, with "Alle senden" / "Alle verwerfen". The token is single use and the
+human still decides, exactly like for a single draft.
+
 ### ntfy (phone)
 
 When a draft is created, mailgate publishes a notification to your ntfy topic with the

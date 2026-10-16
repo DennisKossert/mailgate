@@ -67,7 +67,9 @@ class BypassTest(Env):
         self.assertIn("d1", lines[0])
         self.assertEqual(self.store.draft(1)["status"], "pending")
         self.assertEqual(self.smtp.sent, [])
-        self.assertEqual(self.ntfy.published[-1]["title"], "mailgate d1: approve sending?")
+        title = self.ntfy.published[-1]["title"]
+        self.assertTrue(title.startswith("✉ Send? d1"), title)
+        self.assertIn("→", title)
 
     def test_guard_direct(self):
         token = plugin._active.set("x")
@@ -267,3 +269,17 @@ class PairingTest(Env):
         self.assertEqual(p.state, "locked")
         with self.assertRaises(Exception):
             migrate.fetch_pair(f"{p.code}@127.0.0.1:{p.port}")  # even the right code is useless now
+
+
+class PushTextTest(Env):
+    def test_german_push_shows_account_sender_recipient_subject(self):
+        from mailgate import approve
+        from mailgate.config import Ntfy
+        cfg = type("C", (), {"ntfy": Ntfy("https://x", "t", "r", lang="de"), "undo_seconds": 30})()
+        mime = (b"From: Petri <a@example.org>\r\nTo: Max Muster <m@example.com>, b@example.com\r\n"
+                b"Subject: Rechnung 12\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHallo\r\n")
+        pl = approve.ntfy_payload(cfg, 1, mime, "tok", note="rule failed")
+        self.assertIn("Senden? d1", pl["title"])
+        self.assertIn("Petri → Max Muster +1: Rechnung 12", pl["title"])
+        self.assertIn("Betreff: Rechnung 12", pl["message"])
+        self.assertTrue(pl["message"].startswith("⚠ Nicht automatisch gesendet: rule failed"))

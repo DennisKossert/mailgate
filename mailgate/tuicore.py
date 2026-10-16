@@ -58,7 +58,11 @@ DEFAULT_COLORS = {"normal": "default,default", "unread": "default,default,bold",
                   "badge_ok": "green,default,bold", "badge_bad": "red,default,bold",
                   "badge_neutral": "yellow,default", "warn": "red,default", "folder": "default,default",
                   "folder_current": "black,cyan", "search": "black,yellow", "error": "red,default,bold",
-                  "tree": "blue,default", "dim": "default,default,dim"}
+                  "tree": "blue,default", "dim": "default,default,dim",
+                  # draft states: waiting for you / sent / discarded or failed
+                  "draft_pending": "yellow,default,bold", "draft_sent": "green,default",
+                  "draft_bad": "red,default", "flagged": "red,default,bold", "attach": "magenta,default",
+                  "header_key": "blue,default,bold"}
 
 
 @dataclass
@@ -485,7 +489,8 @@ class Controller:
         m = self.msg
         out: list[tuple[str, str]] = []
         if self.view["kind"] == "drafts":
-            self.lines = [("normal", ln) for ln in term_safe(compose.preview(bytes(m["mime"]))).split("\n")]
+            self.lines = [("header" if i < 6 and ":" in ln[:12] else "normal", ln)
+                          for i, ln in enumerate(term_safe(compose.preview(bytes(m["mime"]))).split("\n"))]
             return
         name = term_safe(m["from_name"], True)
         addr = term_safe(m["from_addr"], True)

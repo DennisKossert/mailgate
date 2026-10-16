@@ -154,7 +154,14 @@ class Curses(Frontend):
             if j >= len(ctrl.items):
                 break
             it = ctrl.items[j]
-            style = "unread" if (ctrl.view["kind"] != "drafts" and it.row["unread"]) else "normal"
+            style = "normal"
+            if ctrl.view["kind"] == "drafts":
+                style = {"pending": "draft_pending", "scheduled": "draft_pending", "sent": "draft_sent"}.get(
+                    it.row["status"], "draft_bad")
+            elif it.row["unread"]:
+                style = "unread"
+            elif "\\Flagged" in (it.row["flags"] or ""):
+                style = "flagged"
             if sel and sel[0] <= j <= sel[1]:
                 style = "visual"
             elif j == ctrl.cur and ctrl.mode != "folders":
@@ -173,6 +180,11 @@ class Curses(Frontend):
                     label, _, tone = seg.rpartition("|")
                     self.put(y, x, label, min(len(label), max(0, w - (x - x0))), f"badge_{tone}")
                     x += len(label) + 2
+                continue
+            if style == "header" and ":" in text[:9] and "header_key" in self.attr:
+                key, _, val = text.partition(":")
+                self.put(y, x0, key + ":", min(len(key) + 1, w), "header_key")
+                self.put(y, x0 + len(key) + 1, val, max(0, w - len(key) - 1), "normal")
                 continue
             if ctrl.find and ctrl.find.lower() in text.lower() and style in ("normal", "quote"):
                 style = "search"

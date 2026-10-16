@@ -79,16 +79,17 @@ def reply_fields(acct: Account, orig: Row, reply_all: bool = False) -> dict:
             "references": orig["refs"] or ""}
 
 
-def preview(mime: bytes, limit: int | None = None) -> str:
+def preview(mime: bytes, limit: int | None = None, labels: dict | None = None) -> str:
     """Human-readable From/To/Cc/Subject + body of a rendered message."""
     msg = BytesParser(policy=policy.default).parsebytes(mime)
-    lines = [f"{h}: {msg[h]}" for h in ("From", "To", "Cc", "Subject") if msg[h]]
+    lab = labels or {}
+    lines = [f"{lab.get(h, h)}: {msg[h]}" for h in ("From", "To", "Cc", "Subject") if msg[h]]
     atts = [p.get_filename() for p in msg.iter_attachments()]
     if atts:
-        lines.append("Attachments: " + ", ".join(a or "unnamed" for a in atts))
+        lines.append(f"📎 {lab.get('Attachments', 'Attachments')}: " + ", ".join(a or "unnamed" for a in atts))
     part = msg.get_body(preferencelist=("plain",))
     body = part.get_content() if part else ""
     if limit is not None and len(body.encode()) > limit:
         cut = body.encode()[:limit].decode(errors="ignore")
         body = cut + f"\n[... {len(body.encode()) - len(cut.encode())} more bytes not shown]"
-    return "\n".join(lines) + "\n\n" + body.rstrip()
+    return "\n".join(lines) + "\n──────────\n" + body.rstrip()

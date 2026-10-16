@@ -126,6 +126,7 @@ function h(tag, attrs, ...kids) {
     if (v === null || v === undefined || v === false) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (k === "text") el.textContent = v;
+    else if (k === "ah") el.style.setProperty("--ah", v);  // CSSOM, not a style attribute: the CSP forbids inline styles
     else el.setAttribute(k, v === true ? "" : v);
   }
   for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) el.append(c.nodeType ? c : String(c));
@@ -321,7 +322,7 @@ function rowFor(m) {
     type: "button", class: "row" + (m.u ? " unread" : ""), id: "m-" + m.id, "aria-selected": S.sel === m.id ? "true" : "false",
     onclick: () => select(m.id, true),
   }, h("span", { class: "dot", "aria-label": m.u ? "unread" : null }),
-  h("span", { class: "who" }, S.view.kind !== "folder" && S.st.accounts.length > 1 ? [h("span", { class: "acct", text: m.a }), " "] : null,
+  h("span", { class: "who" }, S.view.kind !== "folder" && S.st.accounts.length > 1 ? [h("span", { class: "acct chip", ah: acctHue(m.a), text: m.a }), " "] : null,
     m.fr || m.e), meta, h("span", { class: "subj", text: m.s || "—" }), h("span", { class: "pv", text: m.p })));
 }
 
@@ -490,15 +491,22 @@ async function openMove() {
   } catch (e) { dlg.close(); fail(e); }
 }
 
+/* ---- account colors: a stable hue per account name, used for dots and chips ---- */
+function acctHue(name) {
+  let n = 0;
+  for (const c of String(name || "")) n = (n * 31 + c.charCodeAt(0)) % 360;
+  return n;
+}
+
 /* ---- approvals ---- */
 async function loadDrafts() {
   try {
     S.drafts = await api("/api/drafts");
     const ul = $("list");
-    ul.replaceChildren(...S.drafts.map(d => h("li", {}, h("button", { type: "button", class: "row", id: "m-" + d.id,
+    ul.replaceChildren(...S.drafts.map(d => h("li", {}, h("button", { type: "button", class: "row draft " + d.status, id: "m-" + d.id, ah: acctHue(d.acct),
       "aria-selected": S.sel === d.id ? "true" : "false", onclick: () => showDraft(d.id) },
     h("span", { class: "dot" }), h("span", { class: "who", text: d.to }), h("span", { class: "meta", text: fmtDate(d.created) }),
-    h("span", { class: "subj", text: d.s || "—" }), h("span", { class: "pv", text: `${d.id} · ${d.acct}` })))));
+    h("span", { class: "subj", text: d.s || "—" }), h("span", { class: "pv" }, [h("span", { class: "acct chip", text: d.acct }), ` ${d.id}`])))));
     if (!S.drafts.length) ul.append(h("li", { class: "listmsg", text: t("noDrafts") }));
     if (S.sel && !S.drafts.some(d => d.id === S.sel)) $("reader").replaceChildren(h("div", { class: "empty", text: t("nothingSelected") }));
   } catch (e) { fail(e); }
@@ -513,14 +521,24 @@ function showDraft(id) {
   const sched = d.status === "scheduled";
   const when = sched ? `${t("autoAt")} ${fmtDate(d.send_at, true)}` : `${t("expires")} ${fmtDate(d.expires, true)}`;
   const ro = S.st.readonly;
-  $("reader").replaceChildren(h("div", { class: "draftbox" },
+  $("reader").replaceChildren(h("div", { class: "draftbox", ah: acctHue(d.acct) },
     h("button", { type: "button", class: "icon only-narrow", "aria-label": t("back"), onclick: () => setView("list") }, icon("back")),
     h("h1", { class: "", text: `${d.id} · ${d.s || "—"}` }),
     h("p", { class: "hint", text: `${t("draftBy")} · ${d.acct} · ${when}` }),
-    h("pre", { text: d.preview }),
+    draftPreview(d.preview),
     h("div", { class: "btns" },
       sched ? null : h("button", { type: "button", class: "primary", disabled: ro, onclick: () => draftDo(d.id, "send") }, t("sendDraft")),
       h("button", { type: "button", class: "danger", disabled: ro, onclick: () => draftDo(d.id, "discard") }, sched ? t("stop") : t("discardDraft")))));
+}
+
+function draftPreview(text) {
+  const [head, ...rest] = String(text).split("\n──────────\n");
+  if (!rest.length) return h("pre", { text });
+  const rows = head.split("\n").map(l => {
+    const i = l.indexOf(":");
+    return h("div", { class: "hd" }, [h("b", { text: l.slice(0, i + 1) }), l.slice(i + 1)]);
+  });
+  return h("div", { class: "draftmail" }, h("div", { class: "hds" }, rows), h("pre", { text: rest.join("\n") }));
 }
 
 async function draftDo(id, what) {

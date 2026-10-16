@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Batch approval: `mg draft/reply --quiet` queues without a push, `mg batch` sends ONE push listing
+  all pending drafts with "Alle senden" / "Alle verwerfen" (single-use token, human still decides).
+- Clearer approval pushes: title shows a coloured dot per account, sender, recipient and subject;
+  body has labelled From/To/Subject lines, a 📎 line for attachments and a divider before the text.
+  `lang = "de"` in `[approval.ntfy]` switches the wording to German.
+- Web UI: a stable colour per account (chips), waiting approvals highlighted, structured header
+  block in the approval view, big green Send / red Discard buttons.
+- `mg tui`: colours for draft states (waiting / sent / discarded), flagged mail and header labels
+  (`draft_pending`, `draft_sent`, `draft_bad`, `flagged`, `header_key` in `[colors]`).
+
 ## 0.5.0 (2026-10-08)
 
 - `mg tui`: terminal mail client (stdlib curses, imported only for `mg tui`). Modal and vim-like:

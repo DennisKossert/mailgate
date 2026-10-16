@@ -102,6 +102,7 @@ class Ntfy:
     reject_label: str = "Discard"
     stop_label: str = "Stop"
     priority: int = 4
+    lang: str = "en"  # push wording: en | de
     token_cmd: str | None = None
     token_env: str | None = None
 
@@ -260,7 +261,7 @@ def parse(data: dict) -> Config:
         ntfy = Ntfy(server=n.get("server", "https://ntfy.sh").rstrip("/"), topic=n["topic"],
                     reply_topic=n["reply_topic"], approve_label=n.get("approve_label", "Send"),
                     reject_label=n.get("reject_label", "Discard"), stop_label=n.get("stop_label", "Stop"),
-                    priority=int(n.get("priority", 4)),
+                    priority=int(n.get("priority", 4)), lang=n.get("lang", "en") if n.get("lang") in ("en", "de") else "en",
                     token_cmd=n.get("token_cmd"), token_env=n.get("token_env"))
     r = ap.get("rules") or {}
     rules = Rules(allow_to=[p.lower() for p in r.get("allow_to", [])],
@@ -388,6 +389,7 @@ topic = "{topic}"
 reply_topic = "{reply}"
 approve_label = "Send"            # e.g. "Senden"
 reject_label = "Discard"          # e.g. "Verwerfen"
+# lang = "de"                    # wording of the push: en | de
 # token_cmd = "secret-tool lookup service ntfy"   # access token for a protected server
 
 # [ui]                            # optional web client for humans: mg ui
