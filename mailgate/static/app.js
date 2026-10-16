@@ -17,7 +17,7 @@ const T = {
     attachments: "Attachments", cc: "Cc", date: "Date", noMail: "No mail here.", loading: "Loading…",
     readonly: "Read-only: no UI passphrase is set. Run mg ui --set-passphrase in a terminal to enable changes and sending.",
     synced: t => `Synced ${t}`, newMail: n => `${n} new message${n === 1 ? "" : "s"}`, sent: "Sent.",
-    noDrafts: "No drafts waiting for approval.", draftBy: "Queued by an agent", expires: "expires",
+    noDrafts: "No drafts waiting for approval.", firstContact: "First contact: this address has never written to us", draftBy: "Queued by an agent", expires: "expires",
     autoAt: "sends automatically at", sendDraft: "Send", discardDraft: "Discard", stop: "Stop",
     confirmSendDraft: "Send this draft now?", confirmDiscard: "Discard this message?", needTo: "Add a recipient.",
     notify: "Desktop notifications", notifyOn: "Notifications on", logout: "Log out", wrote: (d, n) => `On ${d}, ${n} wrote:`,
@@ -50,7 +50,7 @@ const T = {
     date: "Datum", noMail: "Hier ist keine Post.", loading: "Lädt…",
     readonly: "Nur lesen: Es ist keine UI-Passphrase gesetzt. Mit mg ui --set-passphrase im Terminal lassen sich Änderungen und Senden freischalten.",
     synced: t => `Abgerufen ${t}`, newMail: n => `${n} neue Nachricht${n === 1 ? "" : "en"}`, sent: "Gesendet.",
-    noDrafts: "Keine Entwürfe warten auf Freigabe.", draftBy: "Von einem Agenten angelegt", expires: "läuft ab",
+    noDrafts: "Keine Entwürfe warten auf Freigabe.", firstContact: "Erstkontakt: diese Adresse hat uns nie geschrieben", draftBy: "Von einem Agenten angelegt", expires: "läuft ab",
     autoAt: "wird automatisch gesendet um", sendDraft: "Senden", discardDraft: "Verwerfen", stop: "Stoppen",
     confirmSendDraft: "Diesen Entwurf jetzt senden?", confirmDiscard: "Diese Nachricht verwerfen?",
     needTo: "Bitte einen Empfänger eintragen.", notify: "Desktop-Benachrichtigungen",
@@ -503,9 +503,9 @@ async function loadDrafts() {
   try {
     S.drafts = await api("/api/drafts");
     const ul = $("list");
-    ul.replaceChildren(...S.drafts.map(d => h("li", {}, h("button", { type: "button", class: "row draft " + d.status, id: "m-" + d.id, ah: acctHue(d.acct),
+    ul.replaceChildren(...S.drafts.map(d => h("li", {}, h("button", { type: "button", class: "row draft " + d.status + (d.first.length ? " first" : ""), id: "m-" + d.id, ah: acctHue(d.acct),
       "aria-selected": S.sel === d.id ? "true" : "false", onclick: () => showDraft(d.id) },
-    h("span", { class: "dot" }), h("span", { class: "who", text: d.to }), h("span", { class: "meta", text: fmtDate(d.created) }),
+    h("span", { class: "dot" }), h("span", { class: "who", text: (d.first.length ? "⚠️ " : "") + d.to }), h("span", { class: "meta", text: fmtDate(d.created) }),
     h("span", { class: "subj", text: d.s || "—" }), h("span", { class: "pv" }, [h("span", { class: "acct chip", text: d.acct }), ` ${d.id}`])))));
     if (!S.drafts.length) ul.append(h("li", { class: "listmsg", text: t("noDrafts") }));
     if (S.sel && !S.drafts.some(d => d.id === S.sel)) $("reader").replaceChildren(h("div", { class: "empty", text: t("nothingSelected") }));
@@ -524,6 +524,7 @@ function showDraft(id) {
   $("reader").replaceChildren(h("div", { class: "draftbox", ah: acctHue(d.acct) },
     h("button", { type: "button", class: "icon only-narrow", "aria-label": t("back"), onclick: () => setView("list") }, icon("back")),
     h("h1", { class: "", text: `${d.id} · ${d.s || "—"}` }),
+    d.first.length ? h("div", { class: "firstwarn", role: "alert", text: `⚠️ ${t("firstContact")}: ${d.first.join(", ")}` }) : null,
     h("p", { class: "hint", text: `${t("draftBy")} · ${d.acct} · ${when}` }),
     draftPreview(d.preview),
     h("div", { class: "btns" },

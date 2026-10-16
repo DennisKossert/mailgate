@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- First-contact safeguard: a recipient who never wrote to us (no stored message from that address,
+  any account) is marked in the push ("⚠️ Erstkontakt"), in the batch push (with a count) and in the
+  web UI approval view. Such drafts never auto-send. `[approval] first_contact = "block"` refuses to
+  queue them unless `--first-contact-ok "<reason>"` is given; the reason goes to the audit log.
+
 - Batch approval: `mg draft/reply --quiet` queues without a push, `mg batch` sends ONE push listing
   all pending drafts with "Alle senden" / "Alle verwerfen" (single-use token, human still decides).
 - Clearer approval pushes: title shows a coloured dot per account, sender, recipient and subject;

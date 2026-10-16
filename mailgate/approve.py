@@ -26,9 +26,9 @@ BATCH_RE = re.compile(r"^\s*(approveall|rejectall)\s+(b[0-9a-z]+)\s+(\S+)\s*$")
 
 
 TEXT = {
-    "en": {"ask": "Send?", "auto": "sending automatically in {s}s", "manual": "Not sent automatically",
+    "en": {"first": "First contact: this address has never written to us", "ask": "Send?", "auto": "sending automatically in {s}s", "manual": "Not sent automatically",
            "nosubject": "(no subject)", "labels": None},
-    "de": {"ask": "Senden?", "auto": "wird automatisch gesendet in {s}s", "manual": "Nicht automatisch gesendet",
+    "de": {"first": "Erstkontakt: diese Adresse hat uns nie geschrieben", "ask": "Senden?", "auto": "wird automatisch gesendet in {s}s", "manual": "Nicht automatisch gesendet",
            "nosubject": "(ohne Betreff)",
            "labels": {"From": "Von", "To": "An", "Cc": "Cc", "Subject": "Betreff", "Attachments": "Anhänge"}},
 }
@@ -38,6 +38,19 @@ DOTS = "🔵🟢🟠🟣🟡🔴"
 def account_dot(sender: str) -> str:
     """A stable colored dot per sending address, so accounts are told apart at a glance in the push."""
     return DOTS[int(hashlib.sha256(addr_only(sender).lower().encode()).hexdigest(), 16) % len(DOTS)]
+
+
+def first_contacts(cfg: Config, store: Store, rcpts: list[str]) -> list[str]:
+    """Recipients that have never written to us (no stored message from them, in any account) and are
+    not one of our own addresses. Sending cold mail without consent is often illegal (e.g. § 7 UWG)."""
+    own = {a.email.lower() for a in cfg.accounts.values()}
+    out = []
+    for r in rcpts:
+        a = addr_only(r).lower()
+        if a and a not in own and a not in out and not store.one(
+                "SELECT 1 FROM msgs WHERE lower(from_addr)=? LIMIT 1", (a,)):
+            out.append(a)
+    return out
 
 
 def addr_only(s: str) -> str:
@@ -105,7 +118,9 @@ def _notify(cfg: Config, store: Store, did: int, mime: bytes, token: str, note: 
     if not cfg.ntfy:
         return None
     try:
-        ntfy_publish(cfg, ntfy_payload(cfg, did, mime, token, note, stop))
+        d = store.draft(did)
+        first = first_contacts(cfg, store, json.loads(d["rcpts"])) if d else []
+        ntfy_publish(cfg, ntfy_payload(cfg, did, mime, token, note, stop, first))
     except Exception as e:  # draft stays queued; other backends still work
         store.audit(did, "notify_failed", "ntfy", str(e)[:200])
         return f"ntfy notification failed: {e}"
@@ -114,9 +129,14 @@ def _notify(cfg: Config, store: Store, did: int, mime: bytes, token: str, note: 
 
 def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: list[str],
                  reply_msg: int | None = None, via: str = "cli", manual: bool = False,
-                 notify: bool = True) -> Queued:
+                 notify: bool = True, first_contact_ok: str = "") -> Queued:
     """Queue a rendered message, then apply the approval mode (manual, auto or rules).
     manual=True always waits for a human (used for unsubscribe mails)."""
+    first = first_contacts(cfg, store, rcpts)
+    if first and cfg.first_contact == "block" and not first_contact_ok.strip():
+        raise ApprovalError("first contact blocked: " + ", ".join(first) + " never wrote to us. Without prior "
+                            'consent, cold mail may be illegal. If there is a legitimate reason, queue with '
+                            '--first-contact-ok "<reason>" (logged)')
     token = secrets.token_urlsafe(18)
     msg = BytesParser(policy=policy.default).parsebytes(mime)
     now = int(time.time())
@@ -125,8 +145,13 @@ def create_draft(cfg: Config, store: Store, acct: Account, mime: bytes, rcpts: l
                           sender=acct.email, rcpts=json.dumps(rcpts), to_addr=str(msg["To"] or ""),
                           subject=str(msg["Subject"] or ""), reply_msg=reply_msg)
     store.audit(did, "queued", via, f"{len(rcpts)} rcpt, {len(mime)} bytes")
+    if first:
+        store.audit(did, "first_contact", via, ", ".join(first) + (f"; reason: {first_contact_ok.strip()[:300]}"
+                                                                    if first_contact_ok.strip() else ""))
     manual = manual or bool(plugin_active())  # drafts from plugin code always wait for a human
     auto, reason = (None, "") if manual else decide(cfg, store, acct, rcpts, mime, reply_msg)
+    if first and auto:  # never unattended to someone who has not written to us
+        auto, reason = None, "first contact: " + ", ".join(first) + " never wrote to us"
     if not auto:
         if reason:
             store.audit(did, "manual_fallback", "system", reason)
@@ -201,7 +226,8 @@ def _scheduled(store: Store, acct: str) -> int:
     return store.one("SELECT COUNT(*) FROM drafts WHERE acct=? AND status='scheduled'", (acct,))[0]
 
 
-def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str, note: str = "", stop: bool = False) -> dict:
+def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str, note: str = "", stop: bool = False,
+                 first: list[str] | None = None) -> dict:
     """ntfy message with http actions posting to the reply topic: Send/Discard, or only Stop."""
     n = cfg.ntfy
     assert n
@@ -224,9 +250,10 @@ def ntfy_payload(cfg: Config, did: int, mime: bytes, token: str, note: str = "",
     if stop:
         title, actions = f"⏱ {t['auto'].format(s=cfg.undo_seconds)} {ref}: {head}", [action(n.stop_label, "reject")]
     else:
-        title = f"✉ {t['ask']} {ref}: {head}"
+        title = ("⚠️ " if first else "✉ ") + f"{t['ask']} {ref}: {head}"
         actions = [action(n.approve_label, "approve"), action(n.reject_label, "reject")]
-    body = (f"⚠ {t['manual']}: {note}\n\n" if note else "") + preview(mime, NTFY_MAX_BODY, t["labels"])
+    body = (f"⚠️ {t['first']}: {', '.join(first)}\n\n" if first else "") + \
+        (f"⚠ {t['manual']}: {note}\n\n" if note else "") + preview(mime, NTFY_MAX_BODY, t["labels"])
     return {"topic": n.topic, "title": title, "message": body, "priority": n.priority, "tags": ["email"],
             "actions": actions}
 
@@ -310,9 +337,12 @@ def batch_request(cfg: Config, store: Store, ids: list[int]) -> tuple[str, str |
     store.kv_set("batch:" + ref, json.dumps({"ids": [d["id"] for d in rows], "hash": sha256(token)}))
     for d in rows:
         store.audit(d["id"], "batch_requested", "cli", ref)
-    lines = [f"{account_dot(d['sender'] or '')} {d['acct']} → {short_addr(d['to_addr'] or '?')[:40]}\n   {(d['subject'] or '(ohne Betreff)')[:70]}"
+    firsts = {d["id"]: first_contacts(cfg, store, json.loads(d["rcpts"])) for d in rows}
+    nfirst = sum(1 for v in firsts.values() if v)
+    lines = [("⚠️ " if firsts[d["id"]] else "") + f"{account_dot(d['sender'] or '')} {d['acct']} → {short_addr(d['to_addr'] or '?')[:40]}\n   {(d['subject'] or '(ohne Betreff)')[:70]}"
              for d in rows]
-    body = "\n".join(lines)
+    body = ("⚠️ Erstkontakt (Adresse hat uns nie geschrieben): "
+            f"{nfirst} von {len(rows)}\n\n" if nfirst else "") + "\n".join(lines)
     if len(body) > NTFY_MAX_BODY:
         body = body[:NTFY_MAX_BODY - 40] + f"\n... (alle {len(rows)} in mg queue --full)"
     c = cfg.ntfy
@@ -324,7 +354,8 @@ def batch_request(cfg: Config, store: Store, ids: list[int]) -> tuple[str, str |
         if c.auth_header():
             a["headers"] = c.auth_header()
         return a
-    payload = {"topic": c.topic, "title": f"✉ {len(rows)} Mails freigeben? {ref}", "message": body,
+    payload = {"topic": c.topic, "title": ("⚠️ " if nfirst else "✉ ") + f"{len(rows)} Mails freigeben? {ref}"
+                                                   + (f" ({nfirst}x Erstkontakt)" if nfirst else ""), "message": body,
                "priority": c.priority, "tags": ["email"],
                "actions": [action(f"Alle {len(rows)} senden", "approveall"), action("Alle verwerfen", "rejectall")]}
     try:

@@ -1148,7 +1148,8 @@ class Controller:
                                     attach_data=att_data)
         q = approve.create_draft(self.cfg, self.store, acct, mime, rcpts,
                                  reply_msg=orig["id"] if mode in ("reply", "all") and orig else None,
-                                 via="tui", manual=True, notify=False)
+                                 via="tui", manual=True, notify=False,
+                                 first_contact_ok="written by a human in mg tui" if self.source == "user" else "")
         ref = draft_ref(q.did)
         if self.source == "user" and self.confirm_send(q.did, f"Send now? Type {ref} to send, Enter keeps it "
                                                                f"as a draft for approval: "):

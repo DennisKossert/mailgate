@@ -165,6 +165,7 @@ class Config:
     mode: str = "manual"
     undo_seconds: int = 0
     max_per_hour: int = 20
+    first_contact: str = "warn"  # warn | block: recipients who never wrote to us
     rules: Rules = field(default_factory=Rules)
     sort_rules: list[SortRule] = field(default_factory=list)
     ui: UI = field(default_factory=UI)
@@ -192,6 +193,12 @@ def _server(t: dict, kind: str, acct: str) -> Server:
     if sec == "plain" and host not in LOOPBACK:
         raise ConfigError(f"account {acct}: plain (unencrypted) {kind} is only allowed on localhost")
     return Server(host, int(t.get(f"{kind}_port", DEFAULT_PORTS[(kind, sec)])), sec)
+
+
+def _first_contact(v) -> str:
+    if v not in ("warn", "block"):
+        raise ConfigError('approval.first_contact must be "warn" or "block"')
+    return v
 
 
 def _mode(v: str | None, where: str) -> str | None:
@@ -280,6 +287,7 @@ def parse(data: dict) -> Config:
                   mode=_mode(ap.get("mode", "manual"), "approval") or "manual",
                   undo_seconds=max(0, int(ap.get("undo_seconds", 0))),
                   max_per_hour=max(0, int(ap.get("max_per_hour", 20))), rules=rules,
+                  first_contact=_first_contact(ap.get("first_contact", "warn")),
                   sort_rules=_sort_rules(data.get("rules")), ui=_ui(data.get("ui") or {}),
                   plugins=list(pl.get("enabled", DEFAULT_PLUGINS)),
                   plugin_settings={k: v for k, v in pl.items() if isinstance(v, dict)})
@@ -374,6 +382,8 @@ expiry_hours = 48                 # pending drafts expire after this
 mode = "manual"                   # manual | auto | rules. auto/rules send WITHOUT a human
                                   # looking at the mail. Read the README first.
 # undo_seconds = 60               # auto/rules: wait this long before sending (needs mg daemon)
+# first_contact = "warn"        # recipients who never wrote to us: "warn" (mark in push/UI) or "block"
+#                                 # (queue only with --first-contact-ok "<reason>", logged in the audit log)
 # max_per_hour = 20               # unattended sends per account per hour, then manual
 
 # [approval.rules]                # only used with mode = "rules"

@@ -474,6 +474,7 @@ def thread(app: App, rid: int) -> list[dict]:
 def drafts(app: App) -> list[dict]:
     return [{"id": draft_ref(d["id"]), "acct": d["acct"], "status": d["status"], "created": d["created"],
              "expires": d["expires"], "send_at": d["send_at"], "to": d["to_addr"], "s": d["subject"],
+             "first": approve.first_contacts(app.cfg, app.store(), json.loads(d["rcpts"])),
              "preview": compose.preview(bytes(d["mime"]))} for d in app.store().pending()]
 
 

@@ -136,6 +136,23 @@ you approved is exactly what goes out over SMTP and what is appended to the Sent
 
 There are three ways to approve. They can be combined.
 
+### First contact check
+
+Cold mail without prior consent is illegal in many places (e.g. § 7 UWG in Germany). When a draft
+is queued, mailgate checks whether each recipient has ever written to you (a stored message from
+that address in any account). If not, the draft is a first contact: it is marked with a warning in
+the push, in the batch push (with a count) and in the web UI, and it never auto-sends, even in
+`auto` or `rules` mode. `mg draft` also prints a warning.
+
+```toml
+[approval]
+first_contact = "warn"   # default; "block" refuses to queue first contacts ...
+```
+
+With `"block"`, queue with `mg draft ... --first-contact-ok "customer asked by phone"`; the reason
+is written to the audit log (`mg log`). A mail you write yourself in `mg tui` counts as vetted by you.
+The check only knows mail that was synced, so run `mg sync` before relying on it.
+
 ### Many drafts at once
 
 `mg draft --quiet` / `mg reply --quiet` queue a draft without a push. `mg batch` then sends one

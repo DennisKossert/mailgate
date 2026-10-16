@@ -211,8 +211,8 @@ def _body(path: str) -> str:
     return sys.stdin.read() if path == "-" else Path(path).read_text()
 
 
-def _queued(cfg, store, acct, mime, rcpts, reply_msg=None, quiet=False) -> None:
-    q = approve.create_draft(cfg, store, acct, mime, rcpts, reply_msg, notify=not quiet)
+def _queued(cfg, store, acct, mime, rcpts, reply_msg=None, quiet=False, ok="") -> None:
+    q = approve.create_draft(cfg, store, acct, mime, rcpts, reply_msg, notify=not quiet, first_contact_ok=ok)
     d = store.draft(q.did)
     ref = draft_ref(q.did)
     if q.state == "sent":
@@ -226,6 +226,8 @@ def _queued(cfg, store, acct, mime, rcpts, reply_msg=None, quiet=False) -> None:
             + (" - no push yet, send one for all with: mg batch" if quiet else ""))
         if q.note:
             out(f"not sent automatically: {q.note}")
+    if first := approve.first_contacts(cfg, store, rcpts):
+        out("WARNING first contact: " + ", ".join(first) + " never wrote to us (cold mail without consent may be illegal)")
     out(compose.preview(mime, 300))
     if q.warn:
         print("warning: " + q.warn, file=sys.stderr)
@@ -236,7 +238,7 @@ def cmd_draft(a) -> None:
     acct = cfg.account(a.acct)
     mime, rcpts = compose.build(acct, compose.addr_list(a.to), a.subject, _body(a.body_file),
                                 compose.addr_list(a.cc), compose.addr_list(a.bcc), attach=a.attach)
-    _queued(cfg, _store(), acct, mime, rcpts, quiet=a.quiet)
+    _queued(cfg, _store(), acct, mime, rcpts, quiet=a.quiet, ok=a.first_contact_ok or "")
 
 
 def cmd_reply(a) -> None:
@@ -247,7 +249,7 @@ def cmd_reply(a) -> None:
     f = compose.reply_fields(acct, m, a.all)
     mime, rcpts = compose.build(acct, f["to"], f["subject"], _body(a.body_file), f["cc"],
                                 in_reply_to=f["in_reply_to"], references=f["references"], attach=a.attach)
-    _queued(cfg, store, acct, mime, rcpts, reply_msg=m["id"], quiet=a.quiet)
+    _queued(cfg, store, acct, mime, rcpts, reply_msg=m["id"], quiet=a.quiet, ok=a.first_contact_ok or "")
 
 
 def cmd_queue(a) -> None:
@@ -666,12 +668,16 @@ def parser() -> argparse.ArgumentParser:
     sp.add_argument("--body-file", required=True, help="file with the body text, '-' for stdin")
     sp.add_argument("--attach", action="append", help="file to attach (repeatable)")
     sp.add_argument("--quiet", action="store_true", help="no approval push now; collect and use mg batch")
+    sp.add_argument("--first-contact-ok", metavar="REASON", help="allow a recipient who never wrote to us "
+                    "(needed when [approval] first_contact = \"block\"; the reason goes to the audit log)")
     sp = cmd("reply", cmd_reply, "queue a reply for human approval")
     sp.add_argument("id")
     sp.add_argument("--body-file", required=True, help="file with the body text, '-' for stdin")
     sp.add_argument("--all", action="store_true", help="reply to all recipients")
     sp.add_argument("--attach", action="append")
     sp.add_argument("--quiet", action="store_true", help="no approval push now; collect and use mg batch")
+    sp.add_argument("--first-contact-ok", metavar="REASON", help="allow a recipient who never wrote to us "
+                    "(needed when [approval] first_contact = \"block\"; the reason goes to the audit log)")
     sp = cmd("batch", cmd_batch, "one approval push for several pending drafts (default: all pending)")
     sp.add_argument("ids", nargs="*")
     sp = cmd("queue", cmd_queue, "list drafts waiting for approval")

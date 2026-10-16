@@ -68,7 +68,7 @@ class BypassTest(Env):
         self.assertEqual(self.store.draft(1)["status"], "pending")
         self.assertEqual(self.smtp.sent, [])
         title = self.ntfy.published[-1]["title"]
-        self.assertTrue(title.startswith("✉ Send? d1"), title)
+        self.assertTrue(title.startswith("⚠️ Send? d1"), title)  # victim@ never wrote to us: first contact
         self.assertIn("→", title)
 
     def test_guard_direct(self):

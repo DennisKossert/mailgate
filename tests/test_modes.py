@@ -11,6 +11,8 @@ class ModesTest(Env):
     def setUp(self) -> None:
         super().setUp()
         daemon.log = lambda msg: None
+        self.imap.add("INBOX", make_mail("Frage", "Hallo", msgid="<known@example.org>"))  # max@ has written to us
+        self.mg("sync")
 
     def draft(self, to: str = "max@example.org", *extra: str) -> tuple[int, str]:
         (self.dir / "b.txt").write_text("Hallo,\n\nkurze Info.\n")
@@ -127,3 +129,56 @@ class ModesTest(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstContactTest(Env):
+    def draft(self, to: str, *extra: str) -> tuple[int, str]:
+        (self.dir / "b.txt").write_text("Hallo")
+        return self.mg("draft", "--to", to, "--subject", "Info", "--body-file", str(self.dir / "b.txt"), *extra)
+
+    def test_warn_marks_push_and_unknown_only(self):
+        self.imap.add("INBOX", make_mail("Frage", "Hi", msgid="<k@example.org>"))
+        self.mg("sync")
+        code, out = self.draft("max@example.org")  # has written to us
+        self.assertNotIn("first contact", out)
+        self.assertTrue(self.ntfy.published[-1]["title"].startswith("✉"))
+        code, out = self.draft("Cold <cold@example.net>")
+        self.assertEqual(code, 0, self.last_err)
+        self.assertIn("WARNING first contact: cold@example.net", out)
+        p = self.ntfy.published[-1]
+        self.assertTrue(p["title"].startswith("⚠️"))
+        self.assertIn("cold@example.net", p["message"])
+        self.assertEqual(self.audit("first_contact")[0][1], "cold@example.net")
+
+    def audit(self, action):
+        return self.store.q("SELECT via, detail FROM audit WHERE action=?", (action,))
+
+    def test_block_needs_reason_and_logs_it(self):
+        self.write_config(approval='first_contact = "block"')
+        code, out = self.draft("cold@example.net")
+        self.assertNotEqual(code, 0)
+        self.assertIn("first contact blocked", self.last_err)
+        self.assertEqual(self.store.pending(), [])
+        code, out = self.draft("cold@example.net", "--first-contact-ok", "asked by phone 2026-10-01")
+        self.assertEqual(code, 0, self.last_err)
+        self.assertIn("reason: asked by phone", self.audit("first_contact")[0][1])
+
+    def test_auto_mode_still_waits_for_first_contact(self):
+        self.write_config(approval='mode = "auto"')
+        _, out = self.draft("cold@example.net")
+        self.assertIn("waiting for human approval", out)
+        self.assertEqual(self.smtp.sent, [])
+
+    def test_batch_counts_first_contacts(self):
+        self.draft("a@example.net", "--quiet")
+        self.draft("b@example.net", "--quiet")
+        self.mg("batch")
+        p = self.ntfy.published[-1]
+        self.assertIn("(2x Erstkontakt)", p["title"])
+        self.assertTrue(p["message"].startswith("⚠️ Erstkontakt"))
+
+    def test_bad_config_value(self):
+        with self.assertRaises(ConfigError):
+            self.write_config(approval='first_contact = "maybe"')
+            from mailgate.config import load
+            load()
