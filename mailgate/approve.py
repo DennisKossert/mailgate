@@ -21,6 +21,7 @@ from .store import Store, draft_ref
 
 NTFY_MAX_BODY = 3500
 CMD_RE = re.compile(r"^\s*(approve|reject)\s+(d[0-9a-z]+)\s+(\S+)\s*$")
+BATCH_RE = re.compile(r"^\s*(approveall|rejectall)\s+(b[0-9a-z]+)\s+(\S+)\s*$")
 
 
 class ApprovalError(Exception):
@@ -258,9 +259,71 @@ def reject_draft(store: Store, did: int, via: str, action: str = "rejected") -> 
     return f"{draft_ref(did)} {action}"
 
 
+def batch_request(cfg: Config, store: Store, ids: list[int]) -> tuple[str, str | None]:
+    """One approval request for several pending drafts: one push listing them all, one token for the set.
+    The human still decides; this only saves a push per draft. Returns (batch ref, warning)."""
+    if not cfg.ntfy:
+        raise ApprovalError("batch approval needs ntfy")
+    rows = [d for d in (store.draft(i) for i in ids) if d and d["status"] == "pending"]
+    if not rows:
+        raise ApprovalError("no pending drafts")
+    token = secrets.token_urlsafe(18)
+    n = int(store.kv_get("batch_seq") or "0") + 1
+    store.kv_set("batch_seq", str(n))
+    ref = "b" + draft_ref(n)[1:]
+    store.kv_set("batch:" + ref, json.dumps({"ids": [d["id"] for d in rows], "hash": sha256(token)}))
+    for d in rows:
+        store.audit(d["id"], "batch_requested", "cli", ref)
+    lines = [f"{draft_ref(d['id'])} an {d['to_addr'][:45]}: {d['subject'][:60]}" for d in rows]
+    body = "\n".join(lines)
+    if len(body) > NTFY_MAX_BODY:
+        body = body[:NTFY_MAX_BODY - 40] + f"\n... (alle {len(rows)} in mg queue --full)"
+    c = cfg.ntfy
+    url = f"{c.server}/{c.reply_topic}"
+
+    def action(label: str, verb: str) -> dict:
+        a = {"action": "http", "label": label, "url": url, "method": "POST",
+             "body": f"{verb} {ref} {token}", "clear": True}
+        if c.auth_header():
+            a["headers"] = c.auth_header()
+        return a
+    payload = {"topic": c.topic, "title": f"mailgate {ref}: {len(rows)} Mails freigeben?", "message": body,
+               "priority": c.priority, "tags": ["email"],
+               "actions": [action(f"Alle {len(rows)} senden", "approveall"), action("Alle verwerfen", "rejectall")]}
+    try:
+        ntfy_publish(cfg, payload)
+        return ref, None
+    except Exception as e:
+        return ref, f"ntfy notification failed: {e}"
+
+
+def handle_batch(cfg: Config, store: Store, verb: str, ref: str, token: str, via: str) -> str:
+    raw = store.kv_get("batch:" + ref)
+    b = json.loads(raw) if raw else None
+    if not b or not hmac.compare_digest(sha256(token), b.get("hash") or ""):
+        return f"{ref}: invalid token, ignored"
+    store.kv_set("batch:" + ref, json.dumps({"ids": b["ids"], "hash": "used"}))  # single use
+    done, fails = 0, []
+    for did in b["ids"]:
+        try:
+            if verb == "approveall":
+                send_draft(cfg, store, did, via + "-batch", note=ref)
+            else:
+                reject_draft(store, did, via + "-batch")
+            done += 1
+        except ApprovalError as e:
+            fails.append(f"{draft_ref(did)}: {e}")
+    what = "gesendet" if verb == "approveall" else "verworfen"
+    res = f"{ref}: {done} von {len(b['ids'])} {what}" + ("; " + "; ".join(fails) if fails else "")
+    ntfy_info(cfg, "mailgate: " + res[:3000])
+    return res
+
+
 def handle_command(cfg: Config, store: Store, text: str, via: str = "ntfy") -> str:
-    """Process 'approve|reject <draft> <token>' from the reply channel."""
+    """Process 'approve|reject <draft> <token>' (or 'approveall|rejectall <batch> <token>') from the reply channel."""
     assert_not_plugin("approve a draft")
+    if mb := BATCH_RE.match(text):
+        return handle_batch(cfg, store, *mb.groups(), via=via)
     m = CMD_RE.match(text)
     if not m:
         return "ignored: not a command"

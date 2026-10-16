@@ -60,6 +60,31 @@ class FlowTest(Env):
         _, out = self.mg("log")
         self.assertRegex(out, r"d1 sent ntfy \| .*Termin \| appended to Sent")
 
+    def test_quiet_drafts_and_batch_approval(self):
+        (self.dir / "body.txt").write_text("Hallo")
+        for i in range(3):
+            code, out = self.mg("draft", "--quiet", "--to", f"v{i}@example.org", "--subject", f"Codes {i}",
+                                "--body-file", str(self.dir / "body.txt"))
+            self.assertEqual(code, 0, self.last_err)
+            self.assertIn("mg batch", out)
+        self.assertEqual(self.ntfy.published, [])
+        code, out = self.mg("batch")
+        self.assertEqual(code, 0, self.last_err)
+        self.assertIn("b1: one approval push for 3", out)
+        p = self.ntfy.published[-1]
+        self.assertIn("v2@example.org", p["message"])
+        self.assertEqual([a["label"] for a in p["actions"]], ["Alle 3 senden", "Alle verwerfen"])
+        token = self.token()
+        self.assertIn("invalid token", approve.handle_command(self.cfg, self.store, "approveall b1 forged"))
+        self.assertIn("invalid token", approve.handle_command(self.cfg, self.store, f"approve d1 {token}"))
+        approve.reject_draft(self.store, 2, "cli", "cancelled")  # handled meanwhile: skipped, others still go
+        res = approve.handle_command(self.cfg, self.store, f"approveall b1 {token}")
+        self.assertIn("2 von 3 gesendet", res)
+        self.assertEqual(len(self.smtp.sent), 2)
+        res = approve.handle_command(self.cfg, self.store, f"approveall b1 {token}")
+        self.assertIn("invalid token", res)  # single use
+        self.assertEqual(len(self.smtp.sent), 2)
+
     def test_wrong_token_and_reject(self):
         self.draft()
         res = approve.handle_command(self.cfg, self.store, "approve d1 forged-token")
